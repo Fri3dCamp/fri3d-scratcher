@@ -1,0 +1,45 @@
+@import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;700&family=Open+Sans:ital,wght@0,400;0,700;1,400&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --color-fri3d-purple: rgb(136 53 201);
+  --color-fri3d-purple-light: rgb(192 133 255);
+  --color-fri3d-orange: rgb(255 173 100);
+  --color-fri3d-mint: rgb(60 232 179);
+  --color-fri3d-mint-dark: rgb(47 173 131);
+  --color-fri3d-red: rgb(255 62 62);
+  --color-fri3d-darkgrey: rgb(45 45 45);
+
+  --font-display: "Montserrat", system-ui, sans-serif;
+  --font-body: "Open Sans", system-ui, sans-serif;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    margin: 0;
+    font-family: var(--font-body);
+    background: #fff;
+    color: #000;
+  }
+}
+
+/* Hard offset shadow, a signature of the Fri3d look. */
+@utility shadow-hard {
+  box-shadow: 8px 8px 0 #000;
+}
+@utility shadow-hard-sm {
+  box-shadow: 4px 4px 0 #000;
+}
+
+/* The vinyl record spins while a deck is playing. */
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.animate-spin-slow {
+  animation: spin-slow 1.8s linear infinite;
+}
