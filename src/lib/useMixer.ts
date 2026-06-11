@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyze, guess } from "web-audio-beat-detector";
+import { parseBlob, selectCover } from "music-metadata";
 import { computeDetailPeaks, computePeaks, MixerEngine } from "./audio";
 import type { DeckSide, EqBand } from "./audio";
 import { CC, LED_COLOR, MidiController, wrapDelta } from "./midi";
@@ -7,6 +8,12 @@ import type { MidiStatus } from "./midi";
 
 export interface DeckState {
   trackName: string | null;
+  /** ID3/metadata title, falls back to the file name. */
+  title: string | null;
+  /** ID3/metadata artist, if present. */
+  artist: string | null;
+  /** Object URL for embedded cover art, if present. */
+  coverUrl: string | null;
   playing: boolean;
   scratching: boolean;
   duration: number;
@@ -35,6 +42,9 @@ export interface DeckState {
 
 const initialDeck = (): DeckState => ({
   trackName: null,
+  title: null,
+  artist: null,
+  coverUrl: null,
   playing: false,
   scratching: false,
   duration: 0,
@@ -71,6 +81,8 @@ export interface MixerApi {
   seek: (side: DeckSide, fraction: number) => void;
   /** Match this deck's tempo + beat phase to the other deck. */
   sync: (side: DeckSide) => void;
+  /** Set this deck's tempo multiplier directly (1 = original). */
+  setTempo: (side: DeckSide, ratio: number) => void;
   /** Reset this deck's tempo multiplier to 1. */
   resetTempo: (side: DeckSide) => void;
   /** Live playback position (seconds) — for animated views. */
@@ -83,6 +95,8 @@ export interface MixerApi {
   setMaster: (value: number) => void;
   /** Jog/scratch from the UI (drag). delta in ticks, active = touching. */
   scratch: (side: DeckSide, delta: number) => void;
+  /** Scratch by a relative number of seconds (platter drag). */
+  scratchSeconds: (side: DeckSide, seconds: number) => void;
   /** Seek by a relative number of seconds (beat-window drag). */
   seekBy: (side: DeckSide, seconds: number) => void;
   setScratching: (side: DeckSide, active: boolean) => void;
@@ -92,6 +106,11 @@ export function useMixer(): MixerApi {
   const engineRef = useRef<MixerEngine | null>(null);
   const midiRef = useRef<MidiController | null>(null);
   const scratchPosRef = useRef<{ left: number | null; right: number | null }>({
+    left: null,
+    right: null,
+  });
+  // Object URLs for cover art, revoked when a deck loads a new track.
+  const coverUrlRef = useRef<{ left: string | null; right: string | null }>({
     left: null,
     right: null,
   });
@@ -121,8 +140,14 @@ export function useMixer(): MixerApi {
     (side: DeckSide, file: File) => {
       const engine = ensureEngine();
       const name = engine.deck(side).loadFile(file);
+      // Revoke any previous cover art for this deck.
+      if (coverUrlRef.current[side]) URL.revokeObjectURL(coverUrlRef.current[side]!);
+      coverUrlRef.current[side] = null;
       setDeck(side, {
         trackName: name,
+        title: name, // replaced by the ID3 title once parsed
+        artist: null,
+        coverUrl: null,
         playing: false,
         duration: 0,
         currentTime: 0,
@@ -134,6 +159,24 @@ export function useMixer(): MixerApi {
         tempo: 1,
         effectiveBpm: null,
       });
+      // Parse ID3/metadata tags for title, artist and cover art.
+      parseBlob(file, { skipCovers: false })
+        .then((meta) => {
+          const cover = selectCover(meta.common.picture);
+          let coverUrl: string | null = null;
+          if (cover) {
+            coverUrl = URL.createObjectURL(new Blob([cover.data as BlobPart], { type: cover.format }));
+            coverUrlRef.current[side] = coverUrl;
+          }
+          setDeck(side, {
+            title: meta.common.title ?? name,
+            artist: meta.common.artist ?? null,
+            coverUrl,
+          });
+        })
+        .catch(() => {
+          /* no tags: keep the file name as the title */
+        });
       // Decode a separate copy for the waveform + beat analysis (playback uses
       // the MediaElement). Peaks render first; BPM detection follows.
       file
@@ -305,6 +348,16 @@ export function useMixer(): MixerApi {
     [],
   );
 
+  const scratchSeconds = useCallback(
+    (side: DeckSide, seconds: number) => {
+      const deck = engineRef.current?.deck(side);
+      if (!deck) return;
+      deck.scratchMove(seconds);
+      setDeck(side, { currentTime: deck.currentTime });
+    },
+    [setDeck],
+  );
+
   const seekBy = useCallback(
     (side: DeckSide, seconds: number) => {
       const deck = engineRef.current?.deck(side);
@@ -432,7 +485,12 @@ export function useMixer(): MixerApi {
 
   // Tear down on unmount.
   useEffect(() => {
-    return () => engineRef.current?.destroy();
+    const covers = coverUrlRef.current;
+    return () => {
+      engineRef.current?.destroy();
+      if (covers.left) URL.revokeObjectURL(covers.left);
+      if (covers.right) URL.revokeObjectURL(covers.right);
+    };
   }, []);
 
   return useMemo(
@@ -451,6 +509,7 @@ export function useMixer(): MixerApi {
       hotCue,
       seek,
       sync,
+      setTempo: applyTempo,
       resetTempo,
       getTime,
       getDetailPeaks,
@@ -459,9 +518,10 @@ export function useMixer(): MixerApi {
       setCrossfader,
       setMaster,
       scratch,
+      scratchSeconds,
       seekBy,
       setScratching,
     }),
-    [left, right, crossfader, master, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCue, seek, sync, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMaster, scratch, seekBy, setScratching],
+    [left, right, crossfader, master, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCue, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMaster, scratch, scratchSeconds, seekBy, setScratching],
   );
 }

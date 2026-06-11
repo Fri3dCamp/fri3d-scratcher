@@ -33,7 +33,6 @@ export function Deck({ side, state, mixer }: DeckProps) {
   const waveColor = isLeft ? "rgb(192,133,255)" : "rgb(60,232,179)";
 
   const fraction = state.duration > 0 ? state.currentTime / state.duration : 0;
-  const progress = fraction * 100;
 
   const pitch = (state.tempo - 1) * 100;
   const tempoShifted = Math.abs(pitch) > 0.05;
@@ -41,6 +40,19 @@ export function Deck({ side, state, mixer }: DeckProps) {
   const cueMarkers: CueMarker[] = [];
   if (state.hotCues[0] != null) cueMarkers.push({ time: state.hotCues[0], color: "#36c5ff", label: "1" });
   if (state.hotCues[1] != null) cueMarkers.push({ time: state.hotCues[1], color: "#ff5bd0", label: "2" });
+
+  // Manual tempo/BPM adjuster.
+  const PITCH_RANGE = 20; // ± percent shown on the fader
+  const noBpm = state.bpm == null;
+  const sliderPitch = Math.max(-PITCH_RANGE, Math.min(PITCH_RANGE, pitch));
+  const setPitch = (percent: number) => mixer.setTempo(side, 1 + percent / 100);
+  const nudgeBpm = (deltaBpm: number) => {
+    if (state.preciseTempo == null || state.effectiveBpm == null) return;
+    mixer.setTempo(side, (state.effectiveBpm + deltaBpm) / state.preciseTempo);
+  };
+  const stepBtn =
+    "rounded-md border-4 border-black bg-white px-2 py-0.5 font-display text-base font-bold leading-none shadow-hard-sm transition-transform enabled:active:translate-x-0.5 enabled:active:translate-y-0.5 enabled:active:shadow-none disabled:opacity-40";
+  const accentRange = isLeft ? "accent-fri3d-purple" : "accent-fri3d-mint-dark";
 
   return (
     <section className={`flex flex-col gap-4 border-8 bg-white p-5 ${borderAccent}`}>
@@ -68,17 +80,21 @@ export function Deck({ side, state, mixer }: DeckProps) {
         />
       </header>
 
-      {/* Track display */}
-      <div className="rounded-md border-4 border-black bg-fri3d-darkgrey px-3 py-2 text-white">
-        <div className="truncate font-display text-sm font-semibold">
-          {state.trackName ?? "No track loaded"}
+      {/* Track info — title (from ID3) above the waveform timeline */}
+      <div className="flex items-center gap-3">
+        {state.coverUrl ? (
+          <img src={state.coverUrl} alt="" className="h-11 w-11 shrink-0 rounded-md border-4 border-black object-cover" />
+        ) : (
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border-4 border-black bg-fri3d-darkgrey text-base text-white">
+            ♪
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-display text-sm font-bold">{state.title ?? "No track loaded"}</div>
+          {state.artist && <div className="truncate text-xs text-fri3d-darkgrey">{state.artist}</div>}
         </div>
-        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/20">
-          <div className="h-full bg-fri3d-orange" style={{ width: `${progress}%` }} />
-        </div>
-        <div className="mt-1 flex justify-between font-display text-[0.65rem] tabular-nums">
-          <span>{formatTime(state.currentTime)}</span>
-          <span>{formatTime(state.duration)}</span>
+        <div className="shrink-0 font-display text-xs tabular-nums text-fri3d-darkgrey">
+          {formatTime(state.currentTime)} / {formatTime(state.duration)}
         </div>
       </div>
 
@@ -124,6 +140,33 @@ export function Deck({ side, state, mixer }: DeckProps) {
         </div>
       </div>
 
+      {/* Manual tempo / BPM adjuster */}
+      <div className="flex items-center gap-3">
+        <span className="font-display text-[0.65rem] font-bold uppercase text-fri3d-darkgrey">Tempo</span>
+        <button type="button" className={stepBtn} disabled={noBpm} onClick={() => nudgeBpm(-0.1)} aria-label="Slower">
+          −
+        </button>
+        <input
+          type="range"
+          min={-PITCH_RANGE}
+          max={PITCH_RANGE}
+          step={0.1}
+          value={sliderPitch}
+          disabled={noBpm}
+          onChange={(e) => setPitch(parseFloat(e.target.value))}
+          onDoubleClick={() => mixer.resetTempo(side)}
+          className={`h-2 flex-1 cursor-ew-resize ${accentRange} disabled:opacity-40`}
+          aria-label="Tempo"
+        />
+        <button type="button" className={stepBtn} disabled={noBpm} onClick={() => nudgeBpm(0.1)} aria-label="Faster">
+          +
+        </button>
+        <span className="w-12 text-right font-display text-xs font-semibold tabular-nums text-fri3d-darkgrey">
+          {pitch > 0 ? "+" : ""}
+          {pitch.toFixed(1)}%
+        </span>
+      </div>
+
       {/* Zoomed waveform with beat grid */}
       <BeatWaveform
         getTime={() => mixer.getTime(side)}
@@ -139,10 +182,9 @@ export function Deck({ side, state, mixer }: DeckProps) {
       {/* Jog + EQ */}
       <div className={`flex items-center gap-4 ${isLeft ? "flex-row" : "flex-row-reverse"}`}>
         <JogWheel
-          playing={state.playing}
-          scratching={state.scratching}
+          getTime={() => mixer.getTime(side)}
           accentClass={jogAccent}
-          onScratch={(d) => mixer.scratch(side, d)}
+          onScratch={(s) => mixer.scratchSeconds(side, s)}
           onScratchActive={(a) => mixer.setScratching(side, a)}
         />
         <div className="flex flex-1 items-end justify-center gap-3">
