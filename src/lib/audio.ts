@@ -26,6 +26,10 @@ export class Deck {
   /** Logical play intent, independent of transient scratch playback. */
   private wantsPlay = false;
   private scratching = false;
+  /** Whether playback was active when the platter was grabbed. */
+  private wasPlaying = false;
+  /** Timer that re-pauses the record shortly after scratch movement stops. */
+  private scratchPauseTimer: ReturnType<typeof setTimeout> | null = null;
   /** Base playback rate (1 = original). Driven by tempo/sync, not scratching. */
   private tempo = 1;
 
@@ -166,30 +170,53 @@ export class Deck {
 
   // --- Scratch ------------------------------------------------------------
 
+  /** Grab/release the platter. Grabbing stops the record dead (like a hand
+   *  on the vinyl); releasing resumes if it had been playing. */
   setScratching(active: boolean): void {
     if (active === this.scratching) return;
     this.scratching = active;
     if (active) {
-      // Allow audio through while scratching even if logically paused.
-      void this.el.play().catch(() => {});
+      this.wasPlaying = this.wantsPlay;
+      this.el.pause(); // hold the record → silence, position frozen
     } else {
+      if (this.scratchPauseTimer !== null) {
+        clearTimeout(this.scratchPauseTimer);
+        this.scratchPauseTimer = null;
+      }
       this.el.playbackRate = this.tempo;
-      if (!this.wantsPlay) this.el.pause();
+      if (this.wasPlaying) void this.el.play().catch(() => {});
+      else this.el.pause();
     }
   }
 
-  /** Nudge playback position by a signed encoder/jog delta (in ticks). */
+  /** Scratch by a signed encoder/jog delta (in ticks). */
   scratch(deltaTicks: number): void {
-    this.nudgeSeconds(deltaTicks * 0.018);
+    this.scratchMove(deltaTicks * 0.018);
   }
 
-  /** Move the playback position by a number of seconds (waveform drag). */
+  /** Move the playback position by a number of seconds while scratching;
+   *  produces sound only while the record is actually moving. */
+  scratchMove(seconds: number): void {
+    if (!this.hasTrack) return;
+    this.el.currentTime = Math.max(0, Math.min(this.duration, this.el.currentTime + seconds));
+    if (!this.scratching) return;
+    // Brief playback so the movement is audible, then silence once it stops.
+    void this.el.play().catch(() => {});
+    if (this.scratchPauseTimer !== null) clearTimeout(this.scratchPauseTimer);
+    this.scratchPauseTimer = setTimeout(() => {
+      this.el.pause();
+      this.scratchPauseTimer = null;
+    }, 70);
+  }
+
+  /** Move the playback position by a number of seconds (silent seek). */
   nudgeSeconds(seconds: number): void {
     if (!this.hasTrack) return;
     this.el.currentTime = Math.max(0, Math.min(this.duration, this.el.currentTime + seconds));
   }
 
   destroy(): void {
+    if (this.scratchPauseTimer !== null) clearTimeout(this.scratchPauseTimer);
     this.el.pause();
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
   }
