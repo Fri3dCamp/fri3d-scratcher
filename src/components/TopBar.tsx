@@ -19,8 +19,8 @@ export function TopBar({ status, supported, deviceName, onConnect }: TopBarProps
   const live = status === "connected";
   return (
     <header className="grid grid-cols-[auto_1fr_auto] items-stretch bg-black text-white">
-      <div className="flex items-center gap-2 px-4 py-3 font-display text-xl font-bold uppercase">
-        <span className="text-fri3d-orange">Fri3d</span>
+      <div className="flex items-center gap-3 px-4 py-3 font-display text-xl font-bold uppercase">
+        <img src="/fri3d-logo-white.svg" alt="Fri3d" className="h-8 w-auto" />
         <span className="text-fri3d-mint">Scratcher</span>
       </div>
 
