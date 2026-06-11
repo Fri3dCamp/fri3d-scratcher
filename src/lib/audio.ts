@@ -2,7 +2,7 @@
 //
 // Per deck the signal chain is:
 //   MediaElementSource -> low(shelf) -> mid(peak) -> high(shelf)
-//     -> volume(gain) -> crossfade(gain) -> master -> destination
+//     -> volume(gain) -> crossfade(gain) -> main -> destination
 //
 // MediaElement playback keeps file loading, seeking and play/pause trivial,
 // which is plenty for a "basic" mixer. Scratching nudges currentTime.
@@ -278,17 +278,17 @@ export class MixerEngine {
   readonly ctx: AudioContext;
   readonly left: Deck;
   readonly right: Deck;
-  private master: GainNode;
+  private main: GainNode;
   private crossfaderValue = 0.5;
 
   constructor() {
     const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     this.ctx = new Ctx();
-    this.master = this.ctx.createGain();
-    this.master.gain.value = 0.9;
-    this.master.connect(this.ctx.destination);
-    this.left = new Deck(this.ctx, this.master);
-    this.right = new Deck(this.ctx, this.master);
+    this.main = this.ctx.createGain();
+    this.main.gain.value = 0.9;
+    this.main.connect(this.ctx.destination);
+    this.left = new Deck(this.ctx, this.main);
+    this.right = new Deck(this.ctx, this.main);
     this.applyCrossfader();
   }
 
@@ -301,8 +301,8 @@ export class MixerEngine {
     if (this.ctx.state === "suspended") void this.ctx.resume();
   }
 
-  setMaster(value: number): void {
-    this.master.gain.value = Math.max(0, Math.min(1, value));
+  setMain(value: number): void {
+    this.main.gain.value = Math.max(0, Math.min(1, value));
   }
 
   /** 0 = full left deck, 1 = full right deck. Equal-power curve. */

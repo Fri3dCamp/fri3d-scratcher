@@ -62,6 +62,7 @@ export function Deck({ side, state, mixer }: DeckProps) {
         </h2>
         <button
           type="button"
+          data-tutorial={`load-${side}`}
           onClick={() => fileRef.current?.click()}
           className="rounded-md border-4 border-black bg-fri3d-mint px-3 py-2 font-display text-xs font-bold uppercase shadow-hard-sm transition-transform active:translate-x-1 active:translate-y-1 active:shadow-none"
         >
@@ -123,6 +124,7 @@ export function Deck({ side, state, mixer }: DeckProps) {
         <div className="flex gap-2">
           <button
             type="button"
+            data-tutorial={`sync-${side}`}
             onClick={() => mixer.sync(side)}
             disabled={state.bpm == null}
             className="rounded-md border-4 border-black bg-fri3d-purple px-3 py-1.5 font-display text-xs font-bold uppercase text-white shadow-hard-sm transition-transform enabled:active:translate-x-1 enabled:active:translate-y-1 enabled:active:shadow-none disabled:opacity-40"
@@ -181,14 +183,16 @@ export function Deck({ side, state, mixer }: DeckProps) {
 
       {/* Jog + EQ */}
       <div className={`flex items-center gap-4 ${isLeft ? "flex-row" : "flex-row-reverse"}`}>
-        <JogWheel
-          getTime={() => mixer.getTime(side)}
-          accentClass={jogAccent}
-          onScratch={(s) => mixer.scratchSeconds(side, s)}
-          onScratchActive={(a) => mixer.setScratching(side, a)}
-        />
+        <div data-tutorial={`jog-${side}`}>
+          <JogWheel
+            getTime={() => mixer.getTime(side)}
+            accentClass={jogAccent}
+            onScratch={(s) => mixer.scratchSeconds(side, s)}
+            onScratchActive={(a) => mixer.setScratching(side, a)}
+          />
+        </div>
         <div className="flex flex-1 items-end justify-center gap-3">
-          <div className="flex flex-col items-center gap-3">
+          <div data-tutorial={`eq-${side}`} className="flex flex-col items-center gap-3">
             <Knob label="High" value={state.eqHigh} onChange={(v) => mixer.setEq(side, "high", v)} />
             <Knob label="Mid" value={state.eqMid} onChange={(v) => mixer.setEq(side, "mid", v)} />
             <Knob label="Low" value={state.eqLow} onChange={(v) => mixer.setEq(side, "low", v)} />
@@ -199,7 +203,9 @@ export function Deck({ side, state, mixer }: DeckProps) {
 
       {/* Pads */}
       <div className="grid grid-cols-4 gap-2">
-        <Pad label="Play" sub={state.playing ? "playing" : "paused"} active={state.playing} pressed={state.padsPressed[0]} onTrigger={() => mixer.togglePlay(side)} />
+        <div data-tutorial={`play-${side}`} className="grid">
+          <Pad label="Play" sub={state.playing ? "playing" : "paused"} active={state.playing} pressed={state.padsPressed[0]} onTrigger={() => mixer.togglePlay(side)} />
+        </div>
         <Pad label="Cue" sub="to start" pressed={state.padsPressed[1]} onTrigger={() => mixer.cue(side)} />
         <Pad
           label="Hot 1"

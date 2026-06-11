@@ -67,7 +67,7 @@ export interface MixerApi {
   left: DeckState;
   right: DeckState;
   crossfader: number;
-  master: number;
+  main: number;
   midiStatus: MidiStatus;
   midiSupported: boolean;
   deviceName?: string;
@@ -95,7 +95,7 @@ export interface MixerApi {
   setEq: (side: DeckSide, band: EqBand, value: number) => void;
   setVolume: (side: DeckSide, value: number) => void;
   setCrossfader: (value: number) => void;
-  setMaster: (value: number) => void;
+  setMain: (value: number) => void;
   /** Jog/scratch from the UI (drag). delta in ticks, active = touching. */
   scratch: (side: DeckSide, delta: number) => void;
   /** Scratch by a relative number of seconds (platter drag). */
@@ -123,7 +123,7 @@ export function useMixer(): MixerApi {
   const [left, setLeft] = useState<DeckState>(initialDeck);
   const [right, setRight] = useState<DeckState>(initialDeck);
   const [crossfader, setCrossfaderState] = useState(0.5);
-  const [master, setMasterState] = useState(0.9);
+  const [main, setMainState] = useState(0.9);
   const [midiStatus, setMidiStatus] = useState<MidiStatus>("idle");
   const [deviceName, setDeviceName] = useState<string | undefined>(undefined);
 
@@ -355,10 +355,10 @@ export function useMixer(): MixerApi {
     [ensureEngine],
   );
 
-  const setMaster = useCallback(
+  const setMain = useCallback(
     (value: number) => {
-      ensureEngine().setMaster(value);
-      setMasterState(value);
+      ensureEngine().setMain(value);
+      setMainState(value);
     },
     [ensureEngine],
   );
@@ -525,7 +525,7 @@ export function useMixer(): MixerApi {
       left,
       right,
       crossfader,
-      master,
+      main,
       midiStatus,
       midiSupported: typeof navigator !== "undefined" && "requestMIDIAccess" in navigator,
       deviceName,
@@ -544,12 +544,12 @@ export function useMixer(): MixerApi {
       setEq,
       setVolume,
       setCrossfader,
-      setMaster,
+      setMain,
       scratch,
       scratchSeconds,
       seekBy,
       setScratching,
     }),
-    [left, right, crossfader, master, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMaster, scratch, scratchSeconds, seekBy, setScratching],
+    [left, right, crossfader, main, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMain, scratch, scratchSeconds, seekBy, setScratching],
   );
 }

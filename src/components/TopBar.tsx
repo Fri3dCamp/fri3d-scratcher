@@ -5,6 +5,8 @@ interface TopBarProps {
   supported: boolean;
   deviceName?: string;
   onConnect: () => void;
+  /** Opens the onboarding tutorial. */
+  onHelp: () => void;
 }
 
 const STATUS_TEXT: Record<MidiStatus, string> = {
@@ -15,10 +17,10 @@ const STATUS_TEXT: Record<MidiStatus, string> = {
   error: "MIDI connection failed",
 };
 
-export function TopBar({ status, supported, deviceName, onConnect }: TopBarProps) {
+export function TopBar({ status, supported, deviceName, onConnect, onHelp }: TopBarProps) {
   const live = status === "connected";
   return (
-    <header className="grid grid-cols-[auto_1fr_auto] items-stretch bg-black text-white">
+    <header className="grid grid-cols-[auto_1fr_auto_auto] items-stretch bg-black text-white">
       <div className="flex items-center gap-3 px-4 py-3 font-display text-xl font-bold uppercase">
         <img src="/fri3d-logo-white.svg" alt="Fri3d" className="h-8 w-auto" />
         <span className="text-fri3d-mint">Scratcher</span>
@@ -37,11 +39,22 @@ export function TopBar({ status, supported, deviceName, onConnect }: TopBarProps
 
       <button
         type="button"
+        data-tutorial="connect"
         onClick={onConnect}
         disabled={!supported || status === "connecting"}
         className="m-2 rounded-md border-4 border-white bg-fri3d-purple px-4 py-2 font-display text-xs font-bold uppercase text-white transition-transform enabled:active:translate-x-0.5 enabled:active:translate-y-0.5 disabled:opacity-50"
       >
         {live ? "Reconnect" : "Connect controller"}
+      </button>
+
+      <button
+        type="button"
+        onClick={onHelp}
+        aria-label="Open tutorial"
+        title="Tutorial"
+        className="m-2 ml-0 rounded-md border-4 border-white bg-fri3d-mint px-3 py-2 font-display text-xs font-bold uppercase text-black transition-transform active:translate-x-0.5 active:translate-y-0.5"
+      >
+        ?
       </button>
     </header>
   );
