@@ -6,6 +6,8 @@ import { Fader } from "./Fader";
 import { JogWheel } from "./JogWheel";
 import { Pad } from "./Pad";
 import { Waveform } from "./Waveform";
+import { BeatWaveform } from "./BeatWaveform";
+import type { CueMarker } from "./BeatWaveform";
 
 interface DeckProps {
   side: DeckSide;
@@ -32,6 +34,13 @@ export function Deck({ side, state, mixer }: DeckProps) {
 
   const fraction = state.duration > 0 ? state.currentTime / state.duration : 0;
   const progress = fraction * 100;
+
+  const pitch = (state.tempo - 1) * 100;
+  const tempoShifted = Math.abs(pitch) > 0.05;
+
+  const cueMarkers: CueMarker[] = [];
+  if (state.hotCues[0] != null) cueMarkers.push({ time: state.hotCues[0], color: "#36c5ff", label: "1" });
+  if (state.hotCues[1] != null) cueMarkers.push({ time: state.hotCues[1], color: "#ff5bd0", label: "2" });
 
   return (
     <section className={`flex flex-col gap-4 border-8 bg-white p-5 ${borderAccent}`}>
@@ -73,12 +82,58 @@ export function Deck({ side, state, mixer }: DeckProps) {
         </div>
       </div>
 
-      {/* Waveform */}
+      {/* Waveform overview */}
       <Waveform
         peaks={state.peaks}
         progress={fraction}
         playedColor={waveColor}
         onSeek={(f) => mixer.seek(side, f)}
+      />
+
+      {/* BPM + beat sync */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-baseline gap-2">
+          <span className={`font-display text-3xl font-bold tabular-nums ${titleAccent}`}>
+            {state.bpm != null ? (tempoShifted ? state.effectiveBpm?.toFixed(1) : state.bpm) : "—"}
+          </span>
+          <span className="font-display text-xs font-semibold uppercase text-fri3d-darkgrey">BPM</span>
+          {tempoShifted && state.bpm != null && (
+            <span className="font-display text-xs font-semibold tabular-nums text-fri3d-red">
+              {pitch > 0 ? "+" : ""}
+              {pitch.toFixed(1)}% · {state.bpm}
+            </span>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => mixer.sync(side)}
+            disabled={state.bpm == null}
+            className="rounded-md border-4 border-black bg-fri3d-purple px-3 py-1.5 font-display text-xs font-bold uppercase text-white shadow-hard-sm transition-transform enabled:active:translate-x-1 enabled:active:translate-y-1 enabled:active:shadow-none disabled:opacity-40"
+          >
+            Sync
+          </button>
+          <button
+            type="button"
+            onClick={() => mixer.resetTempo(side)}
+            disabled={!tempoShifted}
+            className="rounded-md border-4 border-black bg-white px-3 py-1.5 font-display text-xs font-bold uppercase shadow-hard-sm transition-transform enabled:active:translate-x-1 enabled:active:translate-y-1 enabled:active:shadow-none disabled:opacity-40"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+
+      {/* Zoomed waveform with beat grid */}
+      <BeatWaveform
+        getTime={() => mixer.getTime(side)}
+        getDetailPeaks={() => mixer.getDetailPeaks(side)}
+        duration={state.duration}
+        tempo={state.preciseTempo}
+        beatOffset={state.beatOffset}
+        accentColor={waveColor}
+        markers={cueMarkers}
+        onSeek={(s) => mixer.seekBy(side, s)}
       />
 
       {/* Jog + EQ */}

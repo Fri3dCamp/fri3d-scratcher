@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { computePeaks, MixerEngine } from "./audio";
+import { analyze, guess } from "web-audio-beat-detector";
+import { computeDetailPeaks, computePeaks, MixerEngine } from "./audio";
 import type { DeckSide, EqBand } from "./audio";
 import { CC, LED_COLOR, MidiController, wrapDelta } from "./midi";
 import type { MidiStatus } from "./midi";
@@ -20,6 +21,16 @@ export interface DeckState {
   padsPressed: [boolean, boolean, boolean, boolean];
   /** Normalised waveform peaks (0..1), or null while decoding. */
   peaks: number[] | null;
+  /** Rounded detected tempo (BPM), or null if undetected / not analysed yet. */
+  bpm: number | null;
+  /** Precise detected tempo, for beat-grid math. */
+  preciseTempo: number | null;
+  /** First-beat offset in seconds (beat-grid phase). */
+  beatOffset: number;
+  /** Tempo multiplier from sync / nudges (1 = original). */
+  tempo: number;
+  /** Effective BPM after the tempo multiplier. */
+  effectiveBpm: number | null;
 }
 
 const initialDeck = (): DeckState => ({
@@ -35,6 +46,11 @@ const initialDeck = (): DeckState => ({
   hotCues: [null, null],
   padsPressed: [false, false, false, false],
   peaks: null,
+  bpm: null,
+  preciseTempo: null,
+  beatOffset: 0,
+  tempo: 1,
+  effectiveBpm: null,
 });
 
 export interface MixerApi {
@@ -53,12 +69,22 @@ export interface MixerApi {
   hotCue: (side: DeckSide, index: number) => void;
   /** Seek to a fraction (0..1) of the track. */
   seek: (side: DeckSide, fraction: number) => void;
+  /** Match this deck's tempo + beat phase to the other deck. */
+  sync: (side: DeckSide) => void;
+  /** Reset this deck's tempo multiplier to 1. */
+  resetTempo: (side: DeckSide) => void;
+  /** Live playback position (seconds) — for animated views. */
+  getTime: (side: DeckSide) => number;
+  /** High-res waveform peaks for the zoom view. */
+  getDetailPeaks: (side: DeckSide) => Float32Array | null;
   setEq: (side: DeckSide, band: EqBand, value: number) => void;
   setVolume: (side: DeckSide, value: number) => void;
   setCrossfader: (value: number) => void;
   setMaster: (value: number) => void;
   /** Jog/scratch from the UI (drag). delta in ticks, active = touching. */
   scratch: (side: DeckSide, delta: number) => void;
+  /** Seek by a relative number of seconds (beat-window drag). */
+  seekBy: (side: DeckSide, seconds: number) => void;
   setScratching: (side: DeckSide, active: boolean) => void;
 }
 
@@ -102,12 +128,32 @@ export function useMixer(): MixerApi {
         currentTime: 0,
         hotCues: [null, null],
         peaks: null,
+        bpm: null,
+        preciseTempo: null,
+        beatOffset: 0,
+        tempo: 1,
+        effectiveBpm: null,
       });
-      // Decode a separate copy to draw the waveform (playback uses MediaElement).
+      // Decode a separate copy for the waveform + beat analysis (playback uses
+      // the MediaElement). Peaks render first; BPM detection follows.
       file
         .arrayBuffer()
         .then((buf) => engine.ctx.decodeAudioData(buf))
-        .then((audioBuffer) => setDeck(side, { peaks: computePeaks(audioBuffer) }))
+        .then(async (audioBuffer) => {
+          const deck = engine.deck(side);
+          deck.detailPeaks = computeDetailPeaks(audioBuffer);
+          setDeck(side, { peaks: computePeaks(audioBuffer) });
+          try {
+            // analyze() gives the precise tempo; guess() gives the rounded BPM
+            // and the first-beat offset (the grid phase).
+            const [tempo, { bpm, offset }] = await Promise.all([analyze(audioBuffer), guess(audioBuffer)]);
+            deck.preciseTempo = tempo;
+            deck.beatOffset = offset;
+            setDeck(side, { bpm, preciseTempo: tempo, beatOffset: offset, effectiveBpm: tempo });
+          } catch {
+            /* no detectable beats: leave BPM unset */
+          }
+        })
         .catch(() => {
           /* undecodable file: leave the waveform empty */
         });
@@ -146,6 +192,53 @@ export function useMixer(): MixerApi {
       setDeck(side, { currentTime: target });
     },
     [setDeck],
+  );
+
+  const applyTempo = useCallback(
+    (side: DeckSide, ratio: number) => {
+      const engine = ensureEngine();
+      const deck = engine.deck(side);
+      deck.setTempo(ratio);
+      setDeck(side, { tempo: deck.playbackTempo, effectiveBpm: deck.effectiveBpm });
+    },
+    [ensureEngine, setDeck],
+  );
+
+  const resetTempo = useCallback((side: DeckSide) => applyTempo(side, 1), [applyTempo]);
+
+  // Match this deck's tempo and beat phase to the other deck (one-shot SYNC).
+  const sync = useCallback(
+    (side: DeckSide) => {
+      const engine = engineRef.current;
+      if (!engine) return;
+      const other: DeckSide = side === "left" ? "right" : "left";
+      const deck = engine.deck(side);
+      const lead = engine.deck(other);
+      if (deck.preciseTempo == null || lead.effectiveBpm == null || lead.preciseTempo == null) return;
+
+      // 1. Match tempo so the effective BPMs are equal.
+      applyTempo(side, lead.effectiveBpm / deck.preciseTempo);
+
+      // 2. Align beat phase by nudging to the nearest matching beat.
+      const leadPeriod = 60 / lead.preciseTempo;
+      const thisPeriod = 60 / deck.preciseTempo;
+      const frac = (x: number) => x - Math.floor(x);
+      const leadPhase = frac((lead.currentTime - lead.beatOffset) / leadPeriod);
+      const thisPhase = frac((deck.currentTime - deck.beatOffset) / thisPeriod);
+      let delta = leadPhase - thisPhase;
+      if (delta > 0.5) delta -= 1;
+      if (delta < -0.5) delta += 1;
+      deck.seekTo(deck.currentTime + delta * thisPeriod);
+      setDeck(side, { currentTime: deck.currentTime });
+    },
+    [applyTempo, setDeck],
+  );
+
+  const getTime = useCallback((side: DeckSide): number => engineRef.current?.deck(side).currentTime ?? 0, []);
+
+  const getDetailPeaks = useCallback(
+    (side: DeckSide): Float32Array | null => engineRef.current?.deck(side).detailPeaks ?? null,
+    [],
   );
 
   const hotCue = useCallback(
@@ -210,6 +303,16 @@ export function useMixer(): MixerApi {
       engineRef.current?.deck(side).scratch(delta);
     },
     [],
+  );
+
+  const seekBy = useCallback(
+    (side: DeckSide, seconds: number) => {
+      const deck = engineRef.current?.deck(side);
+      if (!deck) return;
+      deck.nudgeSeconds(seconds);
+      setDeck(side, { currentTime: deck.currentTime });
+    },
+    [setDeck],
   );
 
   const setScratching = useCallback(
@@ -347,13 +450,18 @@ export function useMixer(): MixerApi {
       cue,
       hotCue,
       seek,
+      sync,
+      resetTempo,
+      getTime,
+      getDetailPeaks,
       setEq,
       setVolume,
       setCrossfader,
       setMaster,
       scratch,
+      seekBy,
       setScratching,
     }),
-    [left, right, crossfader, master, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCue, seek, setEq, setVolume, setCrossfader, setMaster, scratch, setScratching],
+    [left, right, crossfader, master, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCue, seek, sync, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMaster, scratch, seekBy, setScratching],
   );
 }

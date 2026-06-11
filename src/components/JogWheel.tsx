@@ -66,9 +66,13 @@ export function JogWheel({ playing, scratching, accentClass = "bg-fri3d-purple",
         {/* marker dot so motion is visible */}
         <div className="absolute left-1/2 top-2 h-2 w-2 -translate-x-1/2 rounded-full bg-fri3d-orange" />
       </div>
-      {/* centre label */}
-      <div className={`absolute left-1/2 top-1/2 flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-4 border-black ${accentClass}`}>
-        <span className="font-display text-[0.6rem] font-bold uppercase text-white">Fri3d</span>
+      {/* centre label — spins along with the record */}
+      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+        <div
+          className={`flex h-12 w-12 items-center justify-center rounded-full border-4 border-black ${accentClass} ${playing && !scratching ? "animate-spin-slow" : ""}`}
+        >
+          <span className="font-display text-[0.6rem] font-bold uppercase text-white">Fri3d</span>
+        </div>
       </div>
     </div>
   );

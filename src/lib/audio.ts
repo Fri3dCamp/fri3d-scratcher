@@ -26,6 +26,16 @@ export class Deck {
   /** Logical play intent, independent of transient scratch playback. */
   private wantsPlay = false;
   private scratching = false;
+  /** Base playback rate (1 = original). Driven by tempo/sync, not scratching. */
+  private tempo = 1;
+
+  // --- Beat analysis (set after decoding) ---------------------------------
+  /** Precise detected tempo in BPM, or null if undetected. */
+  preciseTempo: number | null = null;
+  /** Time of the first detected beat (seconds) — the beat-grid phase. */
+  beatOffset = 0;
+  /** High-resolution waveform peaks spanning the whole track, for the zoom view. */
+  detailPeaks: Float32Array | null = null;
 
   constructor(ctx: AudioContext, destination: AudioNode) {
     this.el = new Audio();
@@ -67,6 +77,11 @@ export class Deck {
     this.el.src = this.objectUrl;
     this.el.load();
     this.wantsPlay = false;
+    // Reset any prior analysis/tempo for the new track.
+    this.preciseTempo = null;
+    this.beatOffset = 0;
+    this.detailPeaks = null;
+    this.setTempo(1);
     return file.name;
   }
 
@@ -130,6 +145,25 @@ export class Deck {
     this.volume.gain.value = Math.max(0, Math.min(1, value));
   }
 
+  // --- Tempo / sync -------------------------------------------------------
+
+  /** Base playback-rate multiplier (1 = original tempo). */
+  get playbackTempo(): number {
+    return this.tempo;
+  }
+
+  /** Effective BPM after the tempo multiplier, or null if undetected. */
+  get effectiveBpm(): number | null {
+    return this.preciseTempo == null ? null : this.preciseTempo * this.tempo;
+  }
+
+  /** Set the tempo multiplier. preservesPitch keeps it pitch-correct. */
+  setTempo(ratio: number): void {
+    this.tempo = Math.max(0.5, Math.min(2, ratio));
+    this.el.preservesPitch = true;
+    if (!this.scratching) this.el.playbackRate = this.tempo;
+  }
+
   // --- Scratch ------------------------------------------------------------
 
   setScratching(active: boolean): void {
@@ -139,15 +173,19 @@ export class Deck {
       // Allow audio through while scratching even if logically paused.
       void this.el.play().catch(() => {});
     } else {
-      this.el.playbackRate = 1;
+      this.el.playbackRate = this.tempo;
       if (!this.wantsPlay) this.el.pause();
     }
   }
 
   /** Nudge playback position by a signed encoder/jog delta (in ticks). */
   scratch(deltaTicks: number): void {
+    this.nudgeSeconds(deltaTicks * 0.018);
+  }
+
+  /** Move the playback position by a number of seconds (waveform drag). */
+  nudgeSeconds(seconds: number): void {
     if (!this.hasTrack) return;
-    const seconds = deltaTicks * 0.018;
     this.el.currentTime = Math.max(0, Math.min(this.duration, this.el.currentTime + seconds));
   }
 
@@ -179,6 +217,32 @@ export function computePeaks(buffer: AudioBuffer, buckets = 480): number[] {
   // Normalise so the loudest peak reaches 1.
   if (globalMax > 0) {
     for (let i = 0; i < buckets; i++) peaks[i] /= globalMax;
+  }
+  return peaks;
+}
+
+/**
+ * High-resolution peaks (≈`pps` points per second) spanning the whole track,
+ * for the zoomed beat-grid view. Index a time `t` with `t / duration * length`.
+ */
+export function computeDetailPeaks(buffer: AudioBuffer, pps = 160): Float32Array {
+  const channel = buffer.getChannelData(0);
+  const points = Math.max(1, Math.ceil(buffer.duration * pps));
+  const size = Math.floor(channel.length / points) || 1;
+  const peaks = new Float32Array(points);
+  let globalMax = 0;
+  for (let i = 0; i < points; i++) {
+    const start = i * size;
+    let max = 0;
+    for (let j = 0; j < size; j++) {
+      const v = Math.abs(channel[start + j] || 0);
+      if (v > max) max = v;
+    }
+    peaks[i] = max;
+    if (max > globalMax) globalMax = max;
+  }
+  if (globalMax > 0) {
+    for (let i = 0; i < points; i++) peaks[i] /= globalMax;
   }
   return peaks;
 }
