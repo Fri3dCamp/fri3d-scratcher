@@ -134,24 +134,46 @@ export function Tutorial({ open, onClose, onLoadDemo }: TutorialProps) {
   const cardPlacement = spot == null ? "items-center" : spotInTopHalf ? "items-end" : "items-start";
 
   return (
-    <div className="fixed inset-0 z-50">
+    <div className="pointer-events-none fixed inset-0 z-50">
       {/* Backdrop — with a spotlight hole when the step points at an element */}
       {spot ? (
-        <div
-          className="pointer-events-none fixed rounded-xl border-4 border-fri3d-orange transition-all duration-500 ease-out"
-          style={{
-            top: spot.top - SPOT_PADDING,
-            left: spot.left - SPOT_PADDING,
-            width: spot.width + SPOT_PADDING * 2,
-            height: spot.height + SPOT_PADDING * 2,
-            boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.7)",
-          }}
-        >
-          {/* Pulsing ring to draw the eye */}
-          <div className="absolute -inset-1.5 animate-pulse rounded-xl border-4 border-fri3d-orange" />
-        </div>
+        <>
+          {/* Visual ring + darkening (box-shadow); never blocks the pointer */}
+          <div
+            className="pointer-events-none fixed rounded-xl border-4 border-fri3d-orange transition-all duration-500 ease-out"
+            style={{
+              top: spot.top - SPOT_PADDING,
+              left: spot.left - SPOT_PADDING,
+              width: spot.width + SPOT_PADDING * 2,
+              height: spot.height + SPOT_PADDING * 2,
+              boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.7)",
+            }}
+          >
+            {/* Pulsing ring to draw the eye */}
+            <div className="absolute -inset-1.5 animate-pulse rounded-xl border-4 border-fri3d-orange" />
+          </div>
+          {/* Click blockers around the hole — the highlighted element stays interactive */}
+          <div className="pointer-events-auto fixed inset-x-0 top-0" style={{ height: Math.max(0, spot.top - SPOT_PADDING) }} />
+          <div className="pointer-events-auto fixed inset-x-0 bottom-0" style={{ top: spot.top + spot.height + SPOT_PADDING }} />
+          <div
+            className="pointer-events-auto fixed left-0"
+            style={{
+              top: spot.top - SPOT_PADDING,
+              height: spot.height + SPOT_PADDING * 2,
+              width: Math.max(0, spot.left - SPOT_PADDING),
+            }}
+          />
+          <div
+            className="pointer-events-auto fixed right-0"
+            style={{
+              top: spot.top - SPOT_PADDING,
+              height: spot.height + SPOT_PADDING * 2,
+              left: spot.left + spot.width + SPOT_PADDING,
+            }}
+          />
+        </>
       ) : (
-        <div className="fixed inset-0 bg-black/70" />
+        <div className="pointer-events-auto fixed inset-0 bg-black/70" />
       )}
 
       {/* Card, placed away from the spotlight */}

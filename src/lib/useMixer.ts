@@ -193,8 +193,14 @@ export function useMixer(): MixerApi {
           setDeck(side, { peaks: computePeaks(audioBuffer) });
           try {
             // analyze() gives the precise tempo; guess() gives the rounded BPM
-            // and the first-beat offset (the grid phase).
-            const [tempo, { bpm, offset }] = await Promise.all([analyze(audioBuffer), guess(audioBuffer)]);
+            // and the first-beat offset (the grid phase). The default 90-180
+            // window misreads ~120 BPM house tracks as 160 (a 4:3 error), so
+            // constrain it to the typical dance-music range instead.
+            const tempoSettings = { minTempo: 85, maxTempo: 155 };
+            const [tempo, { bpm, offset }] = await Promise.all([
+              analyze(audioBuffer, tempoSettings),
+              guess(audioBuffer, tempoSettings),
+            ]);
             deck.preciseTempo = tempo;
             deck.beatOffset = offset;
             setDeck(side, { bpm, preciseTempo: tempo, beatOffset: offset, effectiveBpm: tempo });
