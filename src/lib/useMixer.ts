@@ -76,7 +76,10 @@ export interface MixerApi {
   loadFile: (side: DeckSide, file: File) => void;
   togglePlay: (side: DeckSide) => void;
   cue: (side: DeckSide) => void;
-  hotCue: (side: DeckSide, index: number) => void;
+  /** Press a hot-cue pad (overwrite stores at the playhead instead of jumping). */
+  hotCuePress: (side: DeckSide, index: number, overwrite?: boolean) => void;
+  /** Release a hot-cue pad; plays from the cue if it was parked. */
+  hotCueRelease: (side: DeckSide, index: number) => void;
   /** Seek to a fraction (0..1) of the track. */
   seek: (side: DeckSide, fraction: number) => void;
   /** Match this deck's tempo + beat phase to the other deck. */
@@ -114,6 +117,8 @@ export function useMixer(): MixerApi {
     left: null,
     right: null,
   });
+  // Whether a held hot-cue pad parked the deck (so releasing should play).
+  const cuePreviewRef = useRef<Record<string, boolean>>({});
 
   const [left, setLeft] = useState<DeckState>(initialDeck);
   const [right, setRight] = useState<DeckState>(initialDeck);
@@ -284,27 +289,44 @@ export function useMixer(): MixerApi {
     [],
   );
 
-  const hotCue = useCallback(
-    (side: DeckSide, index: number) => {
-      const engine = engineRef.current;
-      if (!engine) return;
-      const deck = engine.deck(side);
-      if (!deck.hasTrack) return;
-      const setter = side === "left" ? setLeft : setRight;
-      setter((prev) => {
-        const cues = [...prev.hotCues] as [number | null, number | null];
-        const stored = cues[index];
-        if (stored == null) {
-          cues[index] = deck.currentTime;
-        } else {
-          deck.seekTo(stored);
-          if (!deck.isPlaying) void deck.play();
-        }
-        return { ...prev, hotCues: cues, playing: deck.isPlaying };
-      });
-    },
-    [],
-  );
+  // Press a hot-cue pad. An empty pad (or overwrite via shift/right-click)
+  // stores the current position. A set pad parks the deck at the cue, paused,
+  // until release — see hotCueRelease.
+  const hotCuePress = useCallback((side: DeckSide, index: number, overwrite = false) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    const deck = engine.deck(side);
+    if (!deck.hasTrack) return;
+    const setter = side === "left" ? setLeft : setRight;
+    const key = `${side}:${index}`;
+    setter((prev) => {
+      const cues = [...prev.hotCues] as [number | null, number | null];
+      const stored = cues[index];
+      if (overwrite || stored == null) {
+        cues[index] = deck.currentTime; // set / overwrite at the playhead
+        cuePreviewRef.current[key] = false;
+        return { ...prev, hotCues: cues };
+      }
+      // Park at the cue, paused; releasing the pad starts playback.
+      deck.seekTo(stored);
+      deck.pause();
+      cuePreviewRef.current[key] = true;
+      return { ...prev, hotCues: cues, currentTime: stored, playing: false };
+    });
+  }, []);
+
+  // Release a hot-cue pad: if it parked the deck, start playing from the cue.
+  const hotCueRelease = useCallback((side: DeckSide, index: number) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    const key = `${side}:${index}`;
+    if (!cuePreviewRef.current[key]) return;
+    cuePreviewRef.current[key] = false;
+    const deck = engine.deck(side);
+    void deck.play();
+    const setter = side === "left" ? setLeft : setRight;
+    setter((prev) => ({ ...prev, playing: deck.isPlaying }));
+  }, []);
 
   const setEq = useCallback(
     (side: DeckSide, band: EqBand, value: number) => {
@@ -438,17 +460,22 @@ export function useMixer(): MixerApi {
           padsPressed[pad] = pressed;
           return { ...prev, padsPressed };
         });
-        if (!pressed) return; // act on press, ignore release
         // UI pads: 0 Play · 1 Cue · 2 Hot 1 · 3 Hot 2
-        if (pad === 0) togglePlay(side);
-        else if (pad === 1) cue(side);
-        else if (pad === 2) hotCue(side, 0);
-        else hotCue(side, 1);
+        if (pad === 0) {
+          if (pressed) togglePlay(side);
+        } else if (pad === 1) {
+          if (pressed) cue(side);
+        } else {
+          // Hot cues: park on press, play on release (hardware has no shift).
+          const cueIndex = pad === 2 ? 0 : 1;
+          if (pressed) hotCuePress(side, cueIndex);
+          else hotCueRelease(side, cueIndex);
+        }
       },
     });
     midiRef.current = controller;
     void controller.connect();
-  }, [ensureEngine, setEq, setVolume, setCrossfader, scratch, setScratching, togglePlay, cue, hotCue]);
+  }, [ensureEngine, setEq, setVolume, setCrossfader, scratch, setScratching, togglePlay, cue, hotCuePress, hotCueRelease]);
 
   // Push play position into state a few times a second for the displays.
   useEffect(() => {
@@ -506,7 +533,8 @@ export function useMixer(): MixerApi {
       loadFile,
       togglePlay,
       cue,
-      hotCue,
+      hotCuePress,
+      hotCueRelease,
       seek,
       sync,
       setTempo: applyTempo,
@@ -522,6 +550,6 @@ export function useMixer(): MixerApi {
       seekBy,
       setScratching,
     }),
-    [left, right, crossfader, master, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCue, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMaster, scratch, scratchSeconds, seekBy, setScratching],
+    [left, right, crossfader, master, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMaster, scratch, scratchSeconds, seekBy, setScratching],
   );
 }
