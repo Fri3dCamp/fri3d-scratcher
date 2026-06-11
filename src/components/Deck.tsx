@@ -201,8 +201,24 @@ export function Deck({ side, state, mixer }: DeckProps) {
       <div className="grid grid-cols-4 gap-2">
         <Pad label="Play" sub={state.playing ? "playing" : "paused"} active={state.playing} pressed={state.padsPressed[0]} onTrigger={() => mixer.togglePlay(side)} />
         <Pad label="Cue" sub="to start" pressed={state.padsPressed[1]} onTrigger={() => mixer.cue(side)} />
-        <Pad label="Hot 1" sub={state.hotCues[0] != null ? formatTime(state.hotCues[0]) : "set"} hot={state.hotCues[0] != null} pressed={state.padsPressed[2]} onTrigger={() => mixer.hotCue(side, 0)} />
-        <Pad label="Hot 2" sub={state.hotCues[1] != null ? formatTime(state.hotCues[1]) : "set"} hot={state.hotCues[1] != null} pressed={state.padsPressed[3]} onTrigger={() => mixer.hotCue(side, 1)} />
+        <Pad
+          label="Hot 1"
+          sub={state.hotCues[0] != null ? formatTime(state.hotCues[0]) : "set"}
+          hot={state.hotCues[0] != null}
+          pressed={state.padsPressed[2]}
+          onPress={(shift) => mixer.hotCuePress(side, 0, shift)}
+          onRelease={() => mixer.hotCueRelease(side, 0)}
+          onContext={() => mixer.hotCuePress(side, 0, true)}
+        />
+        <Pad
+          label="Hot 2"
+          sub={state.hotCues[1] != null ? formatTime(state.hotCues[1]) : "set"}
+          hot={state.hotCues[1] != null}
+          pressed={state.padsPressed[3]}
+          onPress={(shift) => mixer.hotCuePress(side, 1, shift)}
+          onRelease={() => mixer.hotCueRelease(side, 1)}
+          onContext={() => mixer.hotCuePress(side, 1, true)}
+        />
       </div>
     </section>
   );
