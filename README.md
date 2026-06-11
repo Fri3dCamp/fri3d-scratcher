@@ -1,73 +1,64 @@
-# React + TypeScript + Vite
+# Fri3d-scratcher
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A browser-based, two-deck DJ mixer that works with the [**Fri3d DJ addon**](https://fri3dcamp.github.io/badge_2026/dj/) over
+**Web MIDI**, which loads local music files. It also works just with mouse controls.
 
-Currently, two official plugins are available:
+Built with Vite + React + TypeScript + Tailwind CSS v4.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- **Two decks** with independent playback, loaded from your own audio files.
+- **3-band EQ** (low / mid / high), volume fader and an equal-power
+  **crossfader**, all powered by the Web Audio API.
+- **Waveform** per deck with a played/unplayed split, a playhead, and
+  click-to-seek.
+- **Scratch platters** that spin while playing and respond to the hardware
+  scratch encoders or mouse drag.
+- **Transport pads**: Play/Pause, Cue (to start) and two hot cues per deck.
+- **Web MIDI** integration mapping every control on the Fri3d DJ addon, with
+  **LED feedback** sent back to the controller and a console debug log of all
+  MIDI traffic.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Requirements
 
-## Expanding the ESLint configuration
+- A Chromium-based browser (Web MIDI is required for the controller; Web Audio
+  for playback). The app must run over `localhost` or HTTPS, Web MIDI needs a
+  secure context.
+- A Fri3d DJ addon is optional: the UI is fully usable with a mouse.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Getting started
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev      # start the dev server (http://localhost:5173)
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Then:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+1. Open the app and click **Connect controller** to grant Web MIDI access
+   (skip this if you only want to use the mouse).
+2. Click **Load track** on each deck to choose an audio file.
+3. Hit **Play**, ride the EQ and faders, and work the crossfader.
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+### Other scripts
+
+```bash
+npm run build    # type-check and build for production
+npm run preview  # preview the production build
+npm run lint     # run ESLint
 ```
+
+## Controller mapping
+
+The control map (CC numbers, button matrix, scratch encoders and LED palette)
+is documented in [`docs/controller-info.md`](docs/controller-info.md). The
+visual design reference lives in [`docs/fri3d-design.md`](docs/fri3d-design.md).
+
+| Control            | Mapped to                          |
+| ------------------ | ---------------------------------- |
+| Top / mid / bottom pots | Deck EQ low / mid / high      |
+| Faders             | Deck volume                        |
+| Crossfader         | A ⇄ B blend                        |
+| Scratch encoders   | Jog / scratch each deck            |
+| Button matrix      | Play, Cue and hot-cue pads         |
+| LEDs               | Reflect play / cue / hot-cue state |
