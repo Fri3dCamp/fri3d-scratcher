@@ -18,7 +18,12 @@
 // position in seconds is simply playhead / sampleRate.
 
 const RATE_CAP = 8; // clamp |playback rate| so wild flicks don't scream
-const RATE_GATE = 0.002; // below this |rate| a scratched platter is "held" → silent
+const RATE_GATE = 0.002; // below this |rate| the platter is "held" → silent
+// On release the platter keeps its velocity and friction eases it to the
+// target rate, so letting go with speed winds down like a real deck.
+const COAST_TAU_RESUME = 0.18; // s — pitch springs back up to play speed
+const COAST_TAU_STOP = 0.6; // s — platter coasts to a halt when paused
+const COAST_EPS = 0.002; // settle threshold on the eased rate
 
 class ScratchProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -35,6 +40,9 @@ class ScratchProcessor extends AudioWorkletProcessor {
 
     this.playing = false;
     this.scratching = false;
+    this.coasting = false; // friction wind-down after a release
+    this.coastTarget = 0; // rate the wind-down eases toward
+    this.coastCoeff = 0; // per-sample easing factor for the wind-down
 
     // Position-chase time constant (~28 ms): in steady motion the playback
     // rate matches the platter's velocity, with this much lag.
@@ -60,28 +68,38 @@ class ScratchProcessor extends AudioWorkletProcessor {
         break;
       case "play":
         this.playing = true;
+        this.coasting = false;
         break;
       case "pause":
         this.playing = false;
+        this.coasting = false;
+        this.rate = 0;
         break;
       case "seek":
         this.playhead = this.clampPos(m.pos * sampleRate);
         this.target = this.playhead;
+        this.coasting = false;
         break;
       case "tempo":
         this.tempo = m.value;
         break;
       case "scratchStart":
         this.scratching = true;
+        this.coasting = false;
         this.target = this.playhead;
         break;
       case "scratchTarget":
         this.target = this.clampPos(m.pos * sampleRate);
         break;
       case "scratchEnd":
+        // Keep the platter's current velocity and let friction ease it to the
+        // target rate — resume → play speed, stop → 0 — so a release with
+        // speed winds down instead of snapping.
         this.scratching = false;
-        this.rate = 0;
         this.playing = m.resume;
+        this.coasting = true;
+        this.coastTarget = m.resume ? this.tempo : 0;
+        this.coastCoeff = 1 - Math.exp(-1 / ((m.resume ? COAST_TAU_RESUME : COAST_TAU_STOP) * sampleRate));
         break;
     }
   }
@@ -106,24 +124,34 @@ class ScratchProcessor extends AudioWorkletProcessor {
         if (v > RATE_CAP) v = RATE_CAP;
         else if (v < -RATE_CAP) v = -RATE_CAP;
         this.rate = v;
-        this.playhead += v;
+      } else if (this.coasting) {
+        // Friction: ease the release velocity toward the target rate.
+        this.rate += (this.coastTarget - this.rate) * this.coastCoeff;
+        if (Math.abs(this.rate - this.coastTarget) < COAST_EPS) {
+          this.rate = this.coastTarget;
+          this.coasting = false;
+        }
       } else if (this.playing) {
         this.rate = this.tempo;
-        this.playhead += this.tempo;
-        if (this.playhead >= this.length - 1) {
-          this.playhead = this.length - 1;
-          this.playing = false;
-          this.rate = 0;
-          this.port.postMessage({ type: "ended" });
-        }
       } else {
         this.rate = 0;
       }
+      this.playhead += this.rate;
+
+      // End of track (not while scratching — you can scrub to the edge freely).
+      if (this.playhead >= this.length - 1) {
+        this.playhead = this.length - 1;
+        if (!this.scratching && (this.playing || this.coasting)) {
+          this.playing = false;
+          this.coasting = false;
+          this.rate = 0;
+          this.port.postMessage({ type: "ended" });
+        }
+      }
       if (this.playhead < 0) this.playhead = 0;
 
-      // --- output gain: silence a paused deck or a held platter -----------
-      const moving = this.scratching ? Math.abs(this.rate) > RATE_GATE : this.playing;
-      const targetGain = moving ? 1 : 0;
+      // --- output gain: silence a held/paused/stopped platter -------------
+      const targetGain = Math.abs(this.rate) > RATE_GATE ? 1 : 0;
       if (this.gain < targetGain) this.gain = Math.min(targetGain, this.gain + this.gainStep);
       else if (this.gain > targetGain) this.gain = Math.max(targetGain, this.gain - this.gainStep);
 
