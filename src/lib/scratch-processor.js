@@ -22,7 +22,7 @@ const RATE_GATE = 0.002; // below this |rate| the platter is "held" → silent
 // On release the platter keeps its velocity and friction eases it to the
 // target rate, so letting go with speed winds down like a real deck.
 const COAST_TAU_RESUME = 0.18; // s — pitch springs back up to play speed
-const COAST_TAU_STOP = 0.6; // s — platter coasts to a halt when paused
+const COAST_TAU_STOP = 0.2; // s — platter coasts to a halt when paused
 const COAST_EPS = 0.002; // settle threshold on the eased rate
 
 class ScratchProcessor extends AudioWorkletProcessor {
