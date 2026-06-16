@@ -182,15 +182,17 @@ export function useMixer(): MixerApi {
         .catch(() => {
           /* no tags: keep the file name as the title */
         });
-      // Decode a separate copy for the waveform + beat analysis (playback uses
-      // the MediaElement). Peaks render first; BPM detection follows.
+      // Decode the track: the samples feed the scratch worklet for playback,
+      // and the same buffer drives the waveform + beat analysis. Peaks render
+      // first; BPM detection follows.
       file
         .arrayBuffer()
         .then((buf) => engine.ctx.decodeAudioData(buf))
         .then(async (audioBuffer) => {
           const deck = engine.deck(side);
+          void deck.setBuffer(audioBuffer);
           deck.detailPeaks = computeDetailPeaks(audioBuffer);
-          setDeck(side, { peaks: computePeaks(audioBuffer) });
+          setDeck(side, { peaks: computePeaks(audioBuffer), duration: audioBuffer.duration });
           try {
             // analyze() gives the precise tempo; guess() gives the rounded BPM
             // and the first-beat offset (the grid phase). The default 90-180

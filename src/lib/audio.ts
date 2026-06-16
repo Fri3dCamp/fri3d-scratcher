@@ -1,20 +1,33 @@
 // Web Audio engine for two decks plus a crossfader.
 //
 // Per deck the signal chain is:
-//   MediaElementSource -> low(shelf) -> mid(peak) -> high(shelf)
+//   ScratchWorklet -> low(shelf) -> mid(peak) -> high(shelf)
 //     -> volume(gain) -> crossfade(gain) -> main -> destination
 //
-// MediaElement playback keeps file loading, seeking and play/pause trivial,
-// which is plenty for a "basic" mixer. Scratching nudges currentTime.
+// Playback is driven by an AudioWorklet (scratch-processor.js) reading a
+// decoded AudioBuffer with a floating-point playhead. This gives true
+// variable-speed and reverse audio while scratching — a real buffer scratch,
+// not a stutter-seek. The main thread keeps a logical mirror of the playhead
+// (anchored to worklet position reports) so the UI can read the time
+// synchronously every frame.
+
+import scratchProcessorUrl from "./scratch-processor.js?url";
 
 export type DeckSide = "left" | "right";
 export type EqBand = "high" | "mid" | "low";
 
 const EQ_RANGE_DB = 26; // pot at 0 ≈ -26 dB (kill), at 1 ≈ +26 dB, centre = 0
 
+/** Latest position snapshot reported by the worklet, for extrapolation. */
+interface PosSnapshot {
+  pos: number; // seconds
+  rate: number; // signed playback rate (1 = normal)
+  time: number; // AudioContext time the snapshot was taken
+}
+
 export class Deck {
-  readonly el: HTMLAudioElement;
-  private source: MediaElementAudioSourceNode;
+  private readonly ctx: AudioContext;
+  private node: AudioWorkletNode | null = null;
   private low: BiquadFilterNode;
   private mid: BiquadFilterNode;
   private high: BiquadFilterNode;
@@ -22,16 +35,24 @@ export class Deck {
   /** Crossfade contribution, driven by the engine. */
   readonly crossGain: GainNode;
 
-  private objectUrl: string | null = null;
+  /** Resolves once the worklet module is registered and a node can be made. */
+  private readonly workletReady: Promise<void>;
+  /** Messages buffered until the worklet node exists. */
+  private pending: unknown[] = [];
+
+  private trackName: string | null = null;
+  private _duration = 0;
   /** Logical play intent, independent of transient scratch playback. */
   private wantsPlay = false;
   private scratching = false;
   /** Whether playback was active when the platter was grabbed. */
   private wasPlaying = false;
-  /** Timer that re-pauses the record shortly after scratch movement stops. */
-  private scratchPauseTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Scratch chase target the platter feeds (seconds), owned by the main thread. */
+  private scratchTarget = 0;
   /** Base playback rate (1 = original). Driven by tempo/sync, not scratching. */
   private tempo = 1;
+  /** Last position the worklet reported, for synchronous time extrapolation. */
+  private snapshot: PosSnapshot = { pos: 0, rate: 0, time: 0 };
 
   // --- Beat analysis (set after decoding) ---------------------------------
   /** Precise detected tempo in BPM, or null if undetected. */
@@ -41,12 +62,9 @@ export class Deck {
   /** High-resolution waveform peaks spanning the whole track, for the zoom view. */
   detailPeaks: Float32Array | null = null;
 
-  constructor(ctx: AudioContext, destination: AudioNode) {
-    this.el = new Audio();
-    this.el.crossOrigin = "anonymous";
-    this.el.preload = "auto";
-
-    this.source = ctx.createMediaElementSource(this.el);
+  constructor(ctx: AudioContext, destination: AudioNode, workletReady: Promise<void>) {
+    this.ctx = ctx;
+    this.workletReady = workletReady;
 
     this.low = ctx.createBiquadFilter();
     this.low.type = "lowshelf";
@@ -67,7 +85,6 @@ export class Deck {
     this.crossGain = ctx.createGain();
     this.crossGain.gain.value = 1;
 
-    this.source.connect(this.low);
     this.low.connect(this.mid);
     this.mid.connect(this.high);
     this.high.connect(this.volume);
@@ -75,12 +92,20 @@ export class Deck {
     this.crossGain.connect(destination);
   }
 
+  /** Post to the worklet, queueing until the node is created. */
+  private post(msg: unknown): void {
+    if (this.node) this.node.port.postMessage(msg);
+    else this.pending.push(msg);
+  }
+
+  /** Record the track name and reset analysis. The decoded samples arrive
+   *  separately via setBuffer once decoding finishes. */
   loadFile(file: File): string {
-    if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
-    this.objectUrl = URL.createObjectURL(file);
-    this.el.src = this.objectUrl;
-    this.el.load();
+    this.trackName = file.name;
+    this._duration = 0;
     this.wantsPlay = false;
+    this.scratching = false;
+    this.snapshot = { pos: 0, rate: 0, time: this.ctx.currentTime };
     // Reset any prior analysis/tempo for the new track.
     this.preciseTempo = null;
     this.beatOffset = 0;
@@ -89,35 +114,72 @@ export class Deck {
     return file.name;
   }
 
+  /** Hand the decoded buffer to the worklet, creating the node on first use. */
+  async setBuffer(buffer: AudioBuffer): Promise<void> {
+    await this.workletReady;
+    if (!this.node) {
+      this.node = new AudioWorkletNode(this.ctx, "scratch-processor", {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+      });
+      this.node.port.onmessage = (e) => this.onWorkletMessage(e.data);
+      this.node.connect(this.low);
+      // Flush anything that was set before the node existed.
+      for (const msg of this.pending) this.node.port.postMessage(msg);
+      this.pending = [];
+    }
+    // Copy each channel so the original AudioBuffer stays usable for analysis,
+    // and transfer the copies to the worklet thread.
+    const channels: ArrayBuffer[] = [];
+    for (let c = 0; c < buffer.numberOfChannels; c++) {
+      const copy = new Float32Array(buffer.length);
+      copy.set(buffer.getChannelData(c));
+      channels.push(copy.buffer);
+    }
+    this._duration = buffer.duration;
+    this.snapshot = { pos: 0, rate: 0, time: this.ctx.currentTime };
+    this.node.port.postMessage({ type: "load", channels, length: buffer.length }, channels);
+    this.post({ type: "tempo", value: this.tempo });
+  }
+
+  private onWorkletMessage(data: { type: string; pos?: number; rate?: number; time?: number }): void {
+    if (data.type === "pos") {
+      this.snapshot = { pos: data.pos ?? 0, rate: data.rate ?? 0, time: data.time ?? this.ctx.currentTime };
+    } else if (data.type === "ended") {
+      this.wantsPlay = false;
+    }
+  }
+
   get hasTrack(): boolean {
-    return this.objectUrl !== null;
+    return this.trackName !== null;
   }
 
   get isPlaying(): boolean {
     return this.wantsPlay;
   }
 
+  /** Synchronous playhead estimate: the last reported position extrapolated
+   *  forward by the elapsed context time at the reported rate. */
   get currentTime(): number {
-    return this.el.currentTime || 0;
+    const s = this.snapshot;
+    const t = s.pos + s.rate * (this.ctx.currentTime - s.time);
+    return Math.max(0, Math.min(this._duration || t, t));
   }
 
   get duration(): number {
-    return Number.isFinite(this.el.duration) ? this.el.duration : 0;
+    return this._duration;
   }
 
   async play(): Promise<void> {
     if (!this.hasTrack) return;
     this.wantsPlay = true;
-    try {
-      await this.el.play();
-    } catch {
-      /* autoplay may reject until a user gesture; ignored */
-    }
+    if (!this.scratching) this.post({ type: "play" });
   }
 
   pause(): void {
     this.wantsPlay = false;
-    if (!this.scratching) this.el.pause();
+    if (!this.scratching) this.post({ type: "pause" });
   }
 
   togglePlay(): void {
@@ -127,13 +189,15 @@ export class Deck {
 
   /** Jump to the start. Keeps playing if it already was. */
   cue(): void {
-    this.el.currentTime = 0;
-    if (this.wantsPlay) void this.el.play();
+    this.seekTo(0);
   }
 
   seekTo(seconds: number): void {
     if (!this.hasTrack) return;
-    this.el.currentTime = Math.max(0, Math.min(this.duration || seconds, seconds));
+    const pos = Math.max(0, Math.min(this._duration || seconds, seconds));
+    this.scratchTarget = pos;
+    this.snapshot = { pos, rate: this.snapshot.rate, time: this.ctx.currentTime };
+    this.post({ type: "seek", pos });
   }
 
   // --- EQ -----------------------------------------------------------------
@@ -161,31 +225,26 @@ export class Deck {
     return this.preciseTempo == null ? null : this.preciseTempo * this.tempo;
   }
 
-  /** Set the tempo multiplier. preservesPitch keeps it pitch-correct. */
+  /** Set the tempo multiplier (1 = original). */
   setTempo(ratio: number): void {
     this.tempo = Math.max(0.5, Math.min(2, ratio));
-    this.el.preservesPitch = true;
-    if (!this.scratching) this.el.playbackRate = this.tempo;
+    this.post({ type: "tempo", value: this.tempo });
   }
 
   // --- Scratch ------------------------------------------------------------
 
-  /** Grab/release the platter. Grabbing stops the record dead (like a hand
-   *  on the vinyl); releasing resumes if it had been playing. */
+  /** Grab/release the platter. Grabbing holds the record (motion makes sound);
+   *  releasing resumes normal playback if it had been playing. */
   setScratching(active: boolean): void {
     if (active === this.scratching) return;
     this.scratching = active;
     if (active) {
       this.wasPlaying = this.wantsPlay;
-      this.el.pause(); // hold the record → silence, position frozen
+      this.scratchTarget = this.currentTime;
+      this.post({ type: "scratchStart" });
     } else {
-      if (this.scratchPauseTimer !== null) {
-        clearTimeout(this.scratchPauseTimer);
-        this.scratchPauseTimer = null;
-      }
-      this.el.playbackRate = this.tempo;
-      if (this.wasPlaying) void this.el.play().catch(() => {});
-      else this.el.pause();
+      this.wantsPlay = this.wasPlaying;
+      this.post({ type: "scratchEnd", resume: this.wasPlaying });
     }
   }
 
@@ -194,31 +253,22 @@ export class Deck {
     this.scratchMove(deltaTicks * 0.018);
   }
 
-  /** Move the playback position by a number of seconds while scratching;
-   *  produces sound only while the record is actually moving. */
+  /** Move the scratch target by a number of seconds; the worklet sonifies the
+   *  motion. Only meaningful while the platter is grabbed. */
   scratchMove(seconds: number): void {
-    if (!this.hasTrack) return;
-    this.el.currentTime = Math.max(0, Math.min(this.duration, this.el.currentTime + seconds));
-    if (!this.scratching) return;
-    // Brief playback so the movement is audible, then silence once it stops.
-    void this.el.play().catch(() => {});
-    if (this.scratchPauseTimer !== null) clearTimeout(this.scratchPauseTimer);
-    this.scratchPauseTimer = setTimeout(() => {
-      this.el.pause();
-      this.scratchPauseTimer = null;
-    }, 70);
+    if (!this.hasTrack || !this.scratching) return;
+    this.scratchTarget = Math.max(0, Math.min(this._duration, this.scratchTarget + seconds));
+    this.post({ type: "scratchTarget", pos: this.scratchTarget });
   }
 
   /** Move the playback position by a number of seconds (silent seek). */
   nudgeSeconds(seconds: number): void {
-    if (!this.hasTrack) return;
-    this.el.currentTime = Math.max(0, Math.min(this.duration, this.el.currentTime + seconds));
+    this.seekTo(this.currentTime + seconds);
   }
 
   destroy(): void {
-    if (this.scratchPauseTimer !== null) clearTimeout(this.scratchPauseTimer);
-    this.el.pause();
-    if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
+    this.node?.disconnect();
+    this.post({ type: "pause" });
   }
 }
 
@@ -287,8 +337,10 @@ export class MixerEngine {
     this.main = this.ctx.createGain();
     this.main.gain.value = 0.9;
     this.main.connect(this.ctx.destination);
-    this.left = new Deck(this.ctx, this.main);
-    this.right = new Deck(this.ctx, this.main);
+    // Register the scratch worklet once; decks create their nodes when ready.
+    const workletReady = this.ctx.audioWorklet.addModule(scratchProcessorUrl);
+    this.left = new Deck(this.ctx, this.main, workletReady);
+    this.right = new Deck(this.ctx, this.main, workletReady);
     this.applyCrossfader();
   }
 
