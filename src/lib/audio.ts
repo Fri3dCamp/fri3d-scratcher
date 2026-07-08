@@ -12,6 +12,8 @@
 // synchronously every frame.
 
 import scratchProcessorUrl from "./scratch-processor.js?url";
+import recorderProcessorUrl from "./recorder-processor.js?url";
+import { Mp3Encoder } from "@breezystack/lamejs";
 
 export type DeckSide = "left" | "right";
 export type EqBand = "high" | "mid" | "low";
@@ -324,12 +326,39 @@ export function computeDetailPeaks(buffer: AudioBuffer, pps = 160): Float32Array
   return peaks;
 }
 
+/** Minimal typings for the File System Access API used to stream to disk. */
+interface DiskWriter {
+  write(data: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+  abort?(): Promise<void>;
+}
+interface SaveFileHandle {
+  createWritable(): Promise<DiskWriter>;
+}
+type ShowSaveFilePicker = (options?: {
+  suggestedName?: string;
+  types?: { description?: string; accept: Record<string, string[]> }[];
+}) => Promise<SaveFileHandle>;
+
+/** MP3 bitrate (kbps) for recorded sets — 192 is a good quality/size balance. */
+const REC_BITRATE_KBPS = 192;
+
 export class MixerEngine {
   readonly ctx: AudioContext;
   readonly left: Deck;
   readonly right: Deck;
   private main: GainNode;
   private crossfaderValue = 0.5;
+
+  // --- Recording (encodes MP3 and streams it straight to a file on disk) ---
+  private readonly recorderReady: Promise<void>;
+  private recNode: AudioWorkletNode | null = null;
+  private recWriter: DiskWriter | null = null;
+  /** Serialises disk writes so encoded frames never overlap on the stream. */
+  private recWriteQueue: Promise<void> = Promise.resolve();
+  private recEncoder: Mp3Encoder | null = null;
+  private recChannels = 2;
+  private _recording = false;
 
   constructor() {
     const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -339,6 +368,8 @@ export class MixerEngine {
     this.main.connect(this.ctx.destination);
     // Register the scratch worklet once; decks create their nodes when ready.
     const workletReady = this.ctx.audioWorklet.addModule(scratchProcessorUrl);
+    // Register the recorder probe worklet used to stream audio to disk.
+    this.recorderReady = this.ctx.audioWorklet.addModule(recorderProcessorUrl);
     this.left = new Deck(this.ctx, this.main, workletReady);
     this.right = new Deck(this.ctx, this.main, workletReady);
     this.applyCrossfader();
@@ -369,7 +400,119 @@ export class MixerEngine {
     this.right.crossGain.gain.value = Math.cos(((1 - x) * Math.PI) / 2);
   }
 
+  /** Whether streaming a recording to disk is possible in this browser
+   *  (needs the File System Access API's showSaveFilePicker). */
+  get canRecord(): boolean {
+    return typeof window !== "undefined" && "showSaveFilePicker" in window;
+  }
+
+  get isRecording(): boolean {
+    return this._recording;
+  }
+
+  /** Ask the user where to save, then stream the master output to that file as
+   *  an MP3. Taps `main` so it captures exactly what is heard — both decks, EQ,
+   *  crossfader and master gain. Rejects with AbortError if the user cancels.
+   *  Must be called from a user gesture (the save dialog requires activation). */
+  async startRecording(): Promise<void> {
+    if (this._recording) return;
+    const showSaveFilePicker = (window as unknown as { showSaveFilePicker?: ShowSaveFilePicker }).showSaveFilePicker;
+    if (!showSaveFilePicker) throw new Error("File System Access API not supported");
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    // Ask where to record before touching the audio graph.
+    const handle = await showSaveFilePicker({
+      suggestedName: `fri3d-set-${stamp}.mp3`,
+      types: [{ description: "MP3 audio", accept: { "audio/mpeg": [".mp3"] } }],
+    });
+    const writer = await handle.createWritable();
+
+    await this.recorderReady;
+    this.resume();
+
+    this.recChannels = 2;
+    this.recWriteQueue = Promise.resolve();
+    // lamejs supports the standard MP3 sample rates; browser contexts run at
+    // 44100 or 48000, both of which are valid here.
+    this.recEncoder = new Mp3Encoder(this.recChannels, this.ctx.sampleRate, REC_BITRATE_KBPS);
+    this.recWriter = writer;
+
+    this.recNode = new AudioWorkletNode(this.ctx, "recorder-processor", {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    });
+    this.recNode.port.onmessage = (e: MessageEvent<{ chans: Float32Array[] }>) => this.onRecChunk(e.data.chans);
+    this.main.connect(this.recNode);
+    // The silent output keeps the node in the render graph so process() runs.
+    this.recNode.connect(this.ctx.destination);
+    this.recNode.port.postMessage("start");
+    this._recording = true;
+  }
+
+  /** Encode a quantum of Float32 channels to MP3 and queue the frames for
+   *  writing. Writes are serialised so encoded data never interleaves. */
+  private onRecChunk(chans: Float32Array[]): void {
+    if (!this.recWriter || !this.recEncoder || !this._recording) return;
+    const frames = chans[0].length;
+    const left = new Int16Array(frames);
+    const right = new Int16Array(frames);
+    const chL = chans[0];
+    const chR = chans[1] ?? chans[0];
+    for (let i = 0; i < frames; i++) {
+      const l = Math.max(-1, Math.min(1, chL[i]));
+      const r = Math.max(-1, Math.min(1, chR[i]));
+      left[i] = l < 0 ? l * 0x8000 : l * 0x7fff;
+      right[i] = r < 0 ? r * 0x8000 : r * 0x7fff;
+    }
+    const mp3 = this.recEncoder.encodeBuffer(left, right);
+    if (mp3.length > 0) this.enqueueWrite(mp3);
+  }
+
+  /** Append encoded bytes to the disk stream, keeping writes strictly ordered. */
+  private enqueueWrite(bytes: Uint8Array): void {
+    const writer = this.recWriter;
+    if (!writer) return;
+    this.recWriteQueue = this.recWriteQueue.then(() => writer.write(bytes)).catch(() => {});
+  }
+
+  /** Stop capturing, flush the encoder and close the file. Resolves once
+   *  everything is flushed to disk. */
+  async stopRecording(): Promise<void> {
+    if (!this._recording) return;
+    this._recording = false;
+    this.recNode?.port.postMessage("stop");
+    if (this.recNode) {
+      this.main.disconnect(this.recNode);
+      this.recNode.disconnect();
+      this.recNode = null;
+    }
+    // Flush the encoder's final MP3 frame, then drain the write queue.
+    if (this.recEncoder) {
+      const tail = this.recEncoder.flush();
+      if (tail.length > 0) this.enqueueWrite(tail);
+      this.recEncoder = null;
+    }
+    await this.recWriteQueue;
+    const writer = this.recWriter;
+    this.recWriter = null;
+    if (writer) await writer.close();
+  }
+
   destroy(): void {
+    if (this.recNode) {
+      this.recNode.port.postMessage("stop");
+      this.main.disconnect(this.recNode);
+      this.recNode.disconnect();
+      this.recNode = null;
+    }
+    this.recEncoder = null;
+    if (this.recWriter) {
+      const writer = this.recWriter;
+      this.recWriter = null;
+      this._recording = false;
+      void this.recWriteQueue.then(() => writer.abort?.() ?? writer.close());
+    }
     this.left.destroy();
     this.right.destroy();
     void this.ctx.close();

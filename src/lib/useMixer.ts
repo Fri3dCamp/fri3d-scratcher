@@ -72,6 +72,13 @@ export interface MixerApi {
   midiSupported: boolean;
   deviceName?: string;
 
+  /** Whether the master output is currently being recorded. */
+  recording: boolean;
+  /** Whether recording is supported in this browser. */
+  recordingSupported: boolean;
+  /** Seconds elapsed in the current recording (0 when idle). */
+  recordingElapsed: number;
+
   connectMidi: () => void;
   loadFile: (side: DeckSide, file: File) => void;
   togglePlay: (side: DeckSide) => void;
@@ -103,6 +110,12 @@ export interface MixerApi {
   /** Seek by a relative number of seconds (beat-window drag). */
   seekBy: (side: DeckSide, seconds: number) => void;
   setScratching: (side: DeckSide, active: boolean) => void;
+  /** Start recording the master output. */
+  startRecording: () => void;
+  /** Stop recording and download the captured set. */
+  stopRecording: () => void;
+  /** Start recording if idle, otherwise stop and download. */
+  toggleRecording: () => void;
 }
 
 export function useMixer(): MixerApi {
@@ -126,6 +139,10 @@ export function useMixer(): MixerApi {
   const [main, setMainState] = useState(0.9);
   const [midiStatus, setMidiStatus] = useState<MidiStatus>("idle");
   const [deviceName, setDeviceName] = useState<string | undefined>(undefined);
+  const [recording, setRecording] = useState(false);
+  const [recordingElapsed, setRecordingElapsed] = useState(0);
+  // Wall-clock time the current recording started, for the elapsed counter.
+  const recordStartRef = useRef<number | null>(null);
 
   const setDeck = useCallback((side: DeckSide, patch: Partial<DeckState>) => {
     const setter = side === "left" ? setLeft : setRight;
@@ -408,6 +425,49 @@ export function useMixer(): MixerApi {
     [ensureEngine, setDeck],
   );
 
+  // --- Recording ----------------------------------------------------------
+
+  const startRecording = useCallback(() => {
+    const engine = ensureEngine();
+    if (!engine.canRecord || engine.isRecording) return;
+    // startRecording opens the "where to save" dialog, then streams to disk.
+    void engine
+      .startRecording()
+      .then(() => {
+        recordStartRef.current = Date.now();
+        setRecordingElapsed(0);
+        setRecording(true);
+      })
+      .catch((err: unknown) => {
+        // The user dismissing the save dialog is not an error worth surfacing.
+        if ((err as DOMException)?.name !== "AbortError") console.error("Recording failed:", err);
+      });
+  }, [ensureEngine]);
+
+  const stopRecording = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine || !engine.isRecording) return;
+    setRecording(false);
+    recordStartRef.current = null;
+    void engine.stopRecording();
+  }, []);
+
+  const toggleRecording = useCallback(() => {
+    if (engineRef.current?.isRecording) stopRecording();
+    else startRecording();
+  }, [startRecording, stopRecording]);
+
+  // Tick the elapsed-time counter while recording.
+  useEffect(() => {
+    if (!recording) return;
+    const id = window.setInterval(() => {
+      if (recordStartRef.current != null) {
+        setRecordingElapsed((Date.now() - recordStartRef.current) / 1000);
+      }
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [recording]);
+
   // --- MIDI ---------------------------------------------------------------
 
   const connectMidi = useCallback(() => {
@@ -537,6 +597,9 @@ export function useMixer(): MixerApi {
       midiStatus,
       midiSupported: typeof navigator !== "undefined" && "requestMIDIAccess" in navigator,
       deviceName,
+      recording,
+      recordingSupported: typeof window !== "undefined" && "showSaveFilePicker" in window,
+      recordingElapsed,
       connectMidi,
       loadFile,
       togglePlay,
@@ -557,7 +620,10 @@ export function useMixer(): MixerApi {
       scratchSeconds,
       seekBy,
       setScratching,
+      startRecording,
+      stopRecording,
+      toggleRecording,
     }),
-    [left, right, crossfader, main, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMain, scratch, scratchSeconds, seekBy, setScratching],
+    [left, right, crossfader, main, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMain, scratch, scratchSeconds, seekBy, setScratching, recording, recordingElapsed, startRecording, stopRecording, toggleRecording],
   );
 }

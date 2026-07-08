@@ -7,6 +7,14 @@ interface TopBarProps {
   onConnect: () => void;
   /** Opens the onboarding tutorial. */
   onHelp: () => void;
+  /** Whether the master output is currently being recorded. */
+  recording: boolean;
+  /** Whether recording is supported in this browser. */
+  recordingSupported: boolean;
+  /** Seconds elapsed in the current recording. */
+  recordingElapsed: number;
+  /** Start/stop recording the master output. */
+  onToggleRecording: () => void;
 }
 
 const STATUS_TEXT: Record<MidiStatus, string> = {
@@ -17,10 +25,26 @@ const STATUS_TEXT: Record<MidiStatus, string> = {
   error: "MIDI connection failed",
 };
 
-export function TopBar({ status, supported, deviceName, onConnect, onHelp }: TopBarProps) {
+/** Format seconds as m:ss for the recording timer. */
+function formatElapsed(seconds: number): string {
+  const s = Math.floor(seconds);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+export function TopBar({
+  status,
+  supported,
+  deviceName,
+  onConnect,
+  onHelp,
+  recording,
+  recordingSupported,
+  recordingElapsed,
+  onToggleRecording,
+}: TopBarProps) {
   const live = status === "connected";
   return (
-    <header className="grid grid-cols-[auto_1fr_auto_auto] items-stretch bg-black text-white">
+    <header className="grid grid-cols-[auto_1fr_auto_auto_auto] items-stretch bg-black text-white">
       <div className="flex items-center gap-3 px-4 py-3 font-display text-xl font-bold uppercase">
         <img src="/fri3d-logo-white.svg" alt="Fri3d" className="h-8 w-auto" />
         <span className="text-fri3d-mint">Scratcher</span>
@@ -36,6 +60,22 @@ export function TopBar({ status, supported, deviceName, onConnect, onHelp }: Top
           {live && deviceName ? ` · ${deviceName}` : ""}
         </span>
       </div>
+
+      <button
+        type="button"
+        onClick={onToggleRecording}
+        disabled={!recordingSupported}
+        aria-pressed={recording}
+        title={recordingSupported ? "Record your set to an MP3 file on disk" : "Recording needs a Chromium-based browser"}
+        className={`m-2 flex items-center gap-2 rounded-md border-4 border-white px-4 py-2 font-display text-xs font-bold uppercase text-white transition-transform enabled:active:translate-x-0.5 enabled:active:translate-y-0.5 disabled:opacity-50 ${
+          recording ? "bg-fri3d-red" : "bg-black"
+        }`}
+      >
+        <span
+          className={`inline-block h-3 w-3 rounded-full bg-fri3d-red ${recording ? "animate-pulse bg-white" : ""}`}
+        />
+        {recording ? `Rec ${formatElapsed(recordingElapsed)}` : "Record"}
+      </button>
 
       <button
         type="button"

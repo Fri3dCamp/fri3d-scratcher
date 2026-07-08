@@ -43,6 +43,10 @@ export function App() {
         deviceName={mixer.deviceName}
         onConnect={mixer.connectMidi}
         onHelp={() => setTutorialOpen(true)}
+        recording={mixer.recording}
+        recordingSupported={mixer.recordingSupported}
+        recordingElapsed={mixer.recordingElapsed}
+        onToggleRecording={mixer.toggleRecording}
       />
 
       <main className="mx-auto grid w-full max-w-350 grid-cols-1 gap-6 p-6 lg:grid-cols-12">
