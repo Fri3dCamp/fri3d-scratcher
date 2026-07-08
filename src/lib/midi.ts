@@ -101,6 +101,8 @@ export class MidiController {
   private output: MIDIOutput | null = null;
   private events: MidiEvents;
   private ledState = new Array<number>(8).fill(0);
+  /** Last known pressed state per button index, to debounce duplicate firmware events. */
+  private buttonState = new Array<boolean>(8).fill(false);
   /** When true, every in/out MIDI message is logged to the console. */
   debug: boolean;
 
@@ -185,7 +187,14 @@ export class MidiController {
     if (command !== 0xb0 || channel !== 0) return; // Control Change, channel 1
 
     if (cc in BUTTON_CC) {
-      this.events.onButton(BUTTON_CC[cc], value === 127);
+      const index = BUTTON_CC[cc];
+      const pressed = value === 127;
+      // The firmware can emit repeated messages for the same physical state
+      // (e.g. two press events with no release in between). Only forward the
+      // event when the button state actually changes.
+      if (this.buttonState[index] === pressed) return;
+      this.buttonState[index] = pressed;
+      this.events.onButton(index, pressed);
       return;
     }
 
