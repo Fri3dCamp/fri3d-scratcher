@@ -47,18 +47,3 @@ npm run build    # type-check and build for production
 npm run preview  # preview the production build
 npm run lint     # run ESLint
 ```
-
-## Controller mapping
-
-The control map (CC numbers, button matrix, scratch encoders and LED palette)
-is documented in [`docs/controller-info.md`](docs/controller-info.md). The
-visual design reference lives in [`docs/fri3d-design.md`](docs/fri3d-design.md).
-
-| Control            | Mapped to                          |
-| ------------------ | ---------------------------------- |
-| Top / mid / bottom pots | Deck EQ low / mid / high      |
-| Faders             | Deck volume                        |
-| Crossfader         | A ⇄ B blend                        |
-| Scratch encoders   | Jog / scratch each deck            |
-| Button matrix      | Play, Cue and hot-cue pads         |
-| LEDs               | Reflect play / cue / hot-cue state |
