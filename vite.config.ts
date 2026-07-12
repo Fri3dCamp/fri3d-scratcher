@@ -13,7 +13,7 @@ export default defineConfig({
       // Precache only the app shell; audio is fetched from the CDN on demand.
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,ico,woff,woff2}'],
-        navigateFallback: '/index.html',
+        navigateFallback: 'index.html',
         runtimeCaching: [
           {
             // Demo tracks live on the CDN — cache them the first time they play
@@ -41,8 +41,8 @@ export default defineConfig({
         background_color: '#ffffff',
         display: 'standalone',
         orientation: 'landscape',
-        start_url: '/',
-        scope: '/',
+        start_url: '.',
+        scope: '.',
         icons: [
           {
             src: 'favicon.svg',
