@@ -1,6 +1,6 @@
-// Web MIDI interface for the Fri3d DJ addon.
-// All physical controls arrive as Control Change messages on MIDI channel 1
-// (channel 0 in the status byte). See docs/controller-info.md.
+// Web MIDI interface for Fri3d DJ addon and BLOOPPAD-MAXX.
+// Both controllers use Control Change messages on MIDI channel 1
+// (channel 0 in status byte). See docs/controller-info.md.
 
 export type DeckSide = "left" | "right";
 export type EqBand = "high" | "mid" | "low";
@@ -129,6 +129,12 @@ function pickBestPort<T extends { name?: string | null }>(ports: Iterable<T>): T
   return null;
 }
 
+// Current BLOOPPAD-MAXX firmware identifies itself as CH32X035-MIDI. Keep
+// product-name matches too so future firmware can use a friendlier USB name.
+function isBloopPadPort(port: MIDIPort): boolean {
+  return isRealDevice(port.name) && /bloop.?pad|ch32x035-midi/i.test(port.name ?? "");
+}
+
 export type MidiStatus = "unsupported" | "idle" | "connecting" | "connected" | "error";
 
 export interface MidiEvents {
@@ -140,6 +146,8 @@ export interface MidiEvents {
   onScratchActive(side: DeckSide, active: boolean): void;
   /** A matrix button changed. index 0..7. */
   onButton(index: number, pressed: boolean): void;
+  /** A BLOOPPAD-MAXX grid button changed. */
+  onBloopPadButton?(row: number, column: number, pressed: boolean): void;
   /** Connection / device status changed. */
   onStatus(status: MidiStatus, deviceName?: string): void;
 }
@@ -147,8 +155,11 @@ export interface MidiEvents {
 export class MidiController {
   private access: MIDIAccess | null = null;
   private output: MIDIOutput | null = null;
+  private bloopPadOutput: MIDIOutput | null = null;
   private events: MidiEvents;
-  private ledState = new Array<number>(8).fill(0);
+  private ledState = new Array<number>(8).fill(-1);
+  private bloopPadLedState = new Array<number>(64).fill(-1);
+  private bloopPadButtonState = new Array<boolean>(64).fill(false);
   /** Last known pressed state per button index, to debounce duplicate firmware events. */
   private buttonState = new Array<boolean>(8).fill(false);
   /** When true, every in/out MIDI message is logged to the console. */
@@ -173,12 +184,12 @@ export class MidiController {
       const access = await navigator.requestMIDIAccess({ sysex: false });
       this.access = access;
       this.bindInputs();
-      this.pickOutput();
+      this.pickOutputs();
       access.onstatechange = () => {
         this.bindInputs();
-        this.pickOutput();
+        this.pickOutputs();
       };
-      const name = this.firstInputName() ?? this.output?.name;
+      const name = this.deviceNames() || undefined;
       if (this.debug) {
         const inputs = [...access.inputs.values()].map((i) => i.name).join(", ") || "none";
         const outputs = [...access.outputs.values()].map((o) => o.name).join(", ") || "none";
@@ -192,27 +203,51 @@ export class MidiController {
 
   private hasDevice(): boolean {
     if (!this.access) return false;
-    return pickBestPort(this.access.inputs.values()) != null || pickBestPort(this.access.outputs.values()) != null;
+    if (pickBestPort(this.access.inputs.values()) != null || pickBestPort(this.access.outputs.values()) != null) return true;
+    for (const port of [...this.access.inputs.values(), ...this.access.outputs.values()]) {
+      if (isBloopPadPort(port)) return true;
+    }
+    return false;
   }
 
-  private firstInputName(): string | undefined {
-    if (!this.access) return undefined;
-    return pickBestPort(this.access.inputs.values())?.name ?? undefined;
+  private deviceNames(): string {
+    if (!this.access) return "";
+    const names = new Set<string>();
+    for (const input of this.access.inputs.values()) if (input.name && isRealDevice(input.name)) names.add(input.name);
+    for (const output of this.access.outputs.values()) if (output.name && isRealDevice(output.name)) names.add(output.name);
+    return [...names].join(" + ");
   }
 
   private bindInputs(): void {
     if (!this.access) return;
     for (const input of this.access.inputs.values()) {
-      input.onmidimessage = isAddonPort(input.name) ? (e) => this.handleMessage(e) : null;
+      if (isAddonPort(input.name)) {
+        input.onmidimessage = (e) => this.handleMessage(e, false);
+      } else if (isBloopPadPort(input)) {
+        input.onmidimessage = (e) => this.handleMessage(e, true);
+      } else {
+        input.onmidimessage = null;
+      }
     }
   }
 
-  private pickOutput(): void {
+  private pickOutputs(): void {
+    this.output = null;
+    this.bloopPadOutput = null;
     if (!this.access) return;
     this.output = pickBestPort(this.access.outputs.values());
+    for (const output of this.access.outputs.values()) {
+      if (isBloopPadPort(output)) {
+        this.bloopPadOutput = output;
+        break;
+      }
+    }
+    // Force a full refresh when a controller reconnects.
+    this.ledState.fill(-1);
+    this.bloopPadLedState.fill(-1);
   }
 
-  private handleMessage(event: MIDIMessageEvent): void {
+  private handleMessage(event: MIDIMessageEvent, bloopPad: boolean): void {
     const data = event.data;
     if (!data || data.length < 3) return;
     const [status, cc, value] = data;
@@ -228,6 +263,19 @@ export class MidiController {
     }
 
     if (command !== 0xb0 || channel !== 0) return; // Control Change, channel 1
+
+    if (bloopPad) {
+      const row = cc >> 4;
+      const column = cc & 0x0f;
+      if (row < 8 && column < 8) {
+        const index = row * 8 + column;
+        const pressed = value > 0;
+        if (this.bloopPadButtonState[index] === pressed) return;
+        this.bloopPadButtonState[index] = pressed;
+        this.events.onBloopPadButton?.(row, column, pressed);
+      }
+      return;
+    }
 
     if (cc in BUTTON_CC) {
       const index = BUTTON_CC[cc];
@@ -287,6 +335,25 @@ export class MidiController {
   /** Push all 8 LED colours at once. */
   setLeds(colors: number[]): void {
     for (let i = 0; i < 8; i++) this.setLed(i, colors[i] ?? 0);
+  }
+
+  /** Light one BLOOPPAD-MAXX cell using its firmware palette (0..9). */
+  setBloopPadLed(row: number, column: number, color: number): void {
+    if (row < 0 || row > 7 || column < 0 || column > 7) return;
+    const index = row * 8 + column;
+    if (this.bloopPadLedState[index] === color) return;
+    this.bloopPadLedState[index] = color;
+    const cc = (row << 4) | (0x08 + column);
+    this.bloopPadOutput?.send([0xb0, cc, Math.max(0, Math.min(9, color))]);
+  }
+
+  /** Push row-major colours for all 64 BLOOPPAD-MAXX LEDs. */
+  setBloopPadLeds(colors: number[]): void {
+    for (let row = 0; row < 8; row++) {
+      for (let column = 0; column < 8; column++) {
+        this.setBloopPadLed(row, column, colors[row * 8 + column] ?? 0);
+      }
+    }
   }
 }
 

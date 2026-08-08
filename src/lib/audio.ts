@@ -19,6 +19,7 @@
 import scratchProcessorUrl from "./scratch-processor.js?url";
 import recorderProcessorUrl from "./recorder-processor.js?url";
 import { Mp3Encoder } from "@breezystack/lamejs";
+import { SamplePlayer } from "./samplePlayer";
 
 export type DeckSide = "left" | "right";
 export type EqBand = "high" | "mid" | "low";
@@ -385,6 +386,7 @@ export class MixerEngine {
   readonly ctx: AudioContext;
   readonly left: Deck;
   readonly right: Deck;
+  readonly sampler: SamplePlayer;
   private main: GainNode;
   private crossfaderValue = 0.5;
 
@@ -433,6 +435,7 @@ export class MixerEngine {
     this.recorderReady = this.ctx.audioWorklet.addModule(recorderProcessorUrl);
     this.left = new Deck(this.ctx, this.main, this.cueSum, workletReady);
     this.right = new Deck(this.ctx, this.main, this.cueSum, workletReady);
+    this.sampler = new SamplePlayer(this.ctx, this.main);
     this.applyCrossfader();
   }
 
@@ -631,6 +634,7 @@ export class MixerEngine {
     }
     this.left.destroy();
     this.right.destroy();
+    this.sampler.destroy();
     void this.ctx.close();
   }
 }

@@ -4,6 +4,7 @@ import { TopBar } from "./components/TopBar";
 import { Deck } from "./components/Deck";
 import { MixerPanel } from "./components/MixerPanel";
 import { Tutorial } from "./components/Tutorial";
+import { BloopPad } from "./components/BloopPad";
 import { DEMO_TRACKS } from "./lib/demoTracks";
 import type { DeckSide } from "./lib/audio";
 
@@ -54,16 +55,20 @@ export function App() {
         onToggleSplitCue={mixer.toggleSplitCue}
       />
 
-      <main className="mx-auto grid w-full max-w-350 grid-cols-1 gap-6 p-6 lg:grid-cols-12">
-        <div className="lg:col-span-5">
-          <Deck side="left" state={mixer.left} mixer={mixer} />
+      <main className="mx-auto w-full max-w-350 p-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          <div className="lg:col-span-5">
+            <Deck side="left" state={mixer.left} mixer={mixer} />
+          </div>
+          <div className="lg:col-span-2">
+            <MixerPanel mixer={mixer} />
+          </div>
+          <div className="lg:col-span-5">
+            <Deck side="right" state={mixer.right} mixer={mixer} />
+          </div>
         </div>
-        <div className="lg:col-span-2">
-          <MixerPanel mixer={mixer} />
-        </div>
-        <div className="lg:col-span-5">
-          <Deck side="right" state={mixer.right} mixer={mixer} />
-        </div>
+
+        <BloopPad sampler={mixer.sampler} />
       </main>
 
       <Tutorial open={tutorialOpen} onClose={closeTutorial} onLoadDemo={loadDemoTracks} />

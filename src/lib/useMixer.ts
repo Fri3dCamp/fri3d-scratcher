@@ -3,6 +3,7 @@ import { analyze, guess } from "web-audio-beat-detector";
 import { parseBlob, selectCover } from "music-metadata";
 import { computeDetailPeaks, computePeaks, MixerEngine } from "./audio";
 import type { DeckSide, EqBand } from "./audio";
+import { DEFAULT_SAMPLE_NAMES, USER_1_BASE, USER_2_BASE, USER_BANK_SIZE } from "./samplePlayer";
 import { CC, LED_COLOR, MidiController, wrapDelta } from "./midi";
 import type { MidiStatus } from "./midi";
 
@@ -66,6 +67,48 @@ const initialDeck = (): DeckState => ({
   cue: false,
 });
 
+export interface SampleSlot {
+  name: string | null;
+  loading: boolean;
+  error: boolean;
+}
+
+export type SamplerMode = "sequence" | "user1" | "user2";
+
+export interface SamplerApi {
+  samples: SampleSlot[];
+  userBanks: [SampleSlot[], SampleSlot[]];
+  userPressed: boolean[];
+  mode: SamplerMode;
+  sequence: boolean[][];
+  playing: boolean;
+  bpm: number;
+  currentStep: number;
+  loadSample: (index: number, file: File) => void;
+  loadUserSample: (bank: 0 | 1, index: number, file: File) => void;
+  triggerSample: (index: number) => void;
+  triggerUserSample: (bank: 0 | 1, index: number) => void;
+  setMode: (mode: SamplerMode) => void;
+  toggleStep: (row: number, column: number) => void;
+  setBpm: (bpm: number) => void;
+  togglePlaying: () => void;
+  stop: () => void;
+  clear: () => void;
+}
+
+const emptySequence = (): boolean[][] => Array.from({ length: 8 }, () => new Array<boolean>(8).fill(false));
+const defaultSamples = (): SampleSlot[] =>
+  DEFAULT_SAMPLE_NAMES.map((name) => ({ name, loading: false, error: false }));
+const emptyUserBank = (): SampleSlot[] =>
+  Array.from({ length: USER_BANK_SIZE }, () => ({ name: null, loading: false, error: false }));
+const defaultUserBanks = (): [SampleSlot[], SampleSlot[]] => {
+  const user1 = emptyUserBank();
+  DEFAULT_SAMPLE_NAMES.forEach((name, index) => {
+    user1[index] = { name, loading: false, error: false };
+  });
+  return [user1, emptyUserBank()];
+};
+
 export interface MixerApi {
   left: DeckState;
   right: DeckState;
@@ -74,6 +117,7 @@ export interface MixerApi {
   midiStatus: MidiStatus;
   midiSupported: boolean;
   deviceName?: string;
+  sampler: SamplerApi;
 
   /** Whether the master output is currently being recorded. */
   recording: boolean;
@@ -139,6 +183,9 @@ export interface MixerApi {
 export function useMixer(): MixerApi {
   const engineRef = useRef<MixerEngine | null>(null);
   const midiRef = useRef<MidiController | null>(null);
+  const sequenceRef = useRef<boolean[][]>(emptySequence());
+  const samplerModeRef = useRef<SamplerMode>("sequence");
+  const sampleLoadRef = useRef<number[]>(new Array<number>(USER_2_BASE + USER_BANK_SIZE).fill(0));
   const scratchPosRef = useRef<{ left: number | null; right: number | null }>({
     left: null,
     right: null,
@@ -157,6 +204,14 @@ export function useMixer(): MixerApi {
   const [main, setMainState] = useState(0.9);
   const [midiStatus, setMidiStatus] = useState<MidiStatus>("idle");
   const [deviceName, setDeviceName] = useState<string | undefined>(undefined);
+  const [samples, setSamples] = useState<SampleSlot[]>(defaultSamples);
+  const [userBanks, setUserBanks] = useState<[SampleSlot[], SampleSlot[]]>(defaultUserBanks);
+  const [userPressed, setUserPressed] = useState<boolean[]>(() => new Array<boolean>(USER_BANK_SIZE).fill(false));
+  const [samplerMode, setSamplerModeState] = useState<SamplerMode>("sequence");
+  const [sequence, setSequence] = useState<boolean[][]>(emptySequence);
+  const [sequencerPlaying, setSequencerPlaying] = useState(false);
+  const [sequencerBpm, setSequencerBpm] = useState(120);
+  const [currentStep, setCurrentStep] = useState(-1);
   const [recording, setRecording] = useState(false);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   // Wall-clock time the current recording started, for the elapsed counter.
@@ -455,6 +510,153 @@ export function useMixer(): MixerApi {
     [ensureEngine, setDeck],
   );
 
+  // --- BLOOPPAD-MAXX sampler + sequencer ---------------------------------
+
+  const loadSample = useCallback(
+    (index: number, file: File) => {
+      if (index < 0 || index > 7) return;
+      const engine = ensureEngine();
+      const loadId = ++sampleLoadRef.current[index];
+      setSamples((prev) => prev.map((slot, i) => (i === index ? { name: file.name, loading: true, error: false } : slot)));
+      file
+        .arrayBuffer()
+        .then((data) => engine.ctx.decodeAudioData(data))
+        .then((buffer) => {
+          if (sampleLoadRef.current[index] !== loadId) return;
+          engine.sampler.setBuffer(index, buffer);
+          setSamples((prev) => prev.map((slot, i) => (i === index ? { ...slot, loading: false } : slot)));
+        })
+        .catch(() => {
+          if (sampleLoadRef.current[index] !== loadId) return;
+          setSamples((prev) => prev.map((slot, i) => (i === index ? { ...slot, loading: false, error: true } : slot)));
+        });
+    },
+    [ensureEngine],
+  );
+
+  const triggerSample = useCallback(
+    (index: number) => {
+      ensureEngine().sampler.trigger(index);
+    },
+    [ensureEngine],
+  );
+
+  const loadUserSample = useCallback(
+    (bank: 0 | 1, index: number, file: File) => {
+      if (index < 0 || index >= USER_BANK_SIZE) return;
+      const engine = ensureEngine();
+      const bufferIndex = (bank === 0 ? USER_1_BASE : USER_2_BASE) + index;
+      const loadId = ++sampleLoadRef.current[bufferIndex];
+      setUserBanks((prev) => {
+        const next: [SampleSlot[], SampleSlot[]] = [[...prev[0]], [...prev[1]]];
+        next[bank][index] = { name: file.name, loading: true, error: false };
+        return next;
+      });
+      file
+        .arrayBuffer()
+        .then((data) => engine.ctx.decodeAudioData(data))
+        .then((buffer) => {
+          if (sampleLoadRef.current[bufferIndex] !== loadId) return;
+          engine.sampler.setBuffer(bufferIndex, buffer);
+          setUserBanks((prev) => {
+            const next: [SampleSlot[], SampleSlot[]] = [[...prev[0]], [...prev[1]]];
+            next[bank][index] = { ...next[bank][index], loading: false };
+            return next;
+          });
+        })
+        .catch(() => {
+          if (sampleLoadRef.current[bufferIndex] !== loadId) return;
+          setUserBanks((prev) => {
+            const next: [SampleSlot[], SampleSlot[]] = [[...prev[0]], [...prev[1]]];
+            next[bank][index] = { ...next[bank][index], loading: false, error: true };
+            return next;
+          });
+        });
+    },
+    [ensureEngine],
+  );
+
+  const triggerUserSample = useCallback(
+    (bank: 0 | 1, index: number) => {
+      const bufferIndex = (bank === 0 ? USER_1_BASE : USER_2_BASE) + index;
+      ensureEngine().sampler.trigger(bufferIndex);
+    },
+    [ensureEngine],
+  );
+
+  const setSamplerMode = useCallback((mode: SamplerMode) => {
+    samplerModeRef.current = mode;
+    setSamplerModeState(mode);
+    setUserPressed(new Array<boolean>(USER_BANK_SIZE).fill(false));
+  }, []);
+
+  const toggleStep = useCallback((row: number, column: number) => {
+    if (row < 0 || row > 7 || column < 0 || column > 7) return;
+    setSequence((prev) => {
+      const next = prev.map((steps) => [...steps]);
+      next[row][column] = !next[row][column];
+      sequenceRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const setBpm = useCallback((bpm: number) => {
+    if (!Number.isFinite(bpm)) return;
+    setSequencerBpm(Math.max(40, Math.min(240, Math.round(bpm))));
+  }, []);
+
+  const stopSequencer = useCallback(() => {
+    setSequencerPlaying(false);
+    setCurrentStep(-1);
+    engineRef.current?.sampler.stopAll();
+  }, []);
+
+  const toggleSequencer = useCallback(() => {
+    setSequencerPlaying((playing) => !playing);
+  }, []);
+
+  const clearSequence = useCallback(() => {
+    const next = emptySequence();
+    sequenceRef.current = next;
+    setSequence(next);
+  }, []);
+
+  // Web Audio look-ahead scheduler: queue notes 100 ms ahead while polling
+  // every 25 ms. This avoids setInterval jitter without making UI sluggish.
+  useEffect(() => {
+    if (!sequencerPlaying) return;
+    const engine = ensureEngine();
+    const stepDuration = 30 / sequencerBpm; // eighth notes
+    let nextStepTime = engine.ctx.currentTime + 0.05;
+    let step = 0;
+    const uiTimers = new Set<number>();
+
+    const schedule = () => {
+      while (nextStepTime < engine.ctx.currentTime + 0.1) {
+        for (let row = 0; row < 8; row++) {
+          if (sequenceRef.current[row][step]) engine.sampler.trigger(row, nextStepTime);
+        }
+        const shownStep = step;
+        const delay = Math.max(0, (nextStepTime - engine.ctx.currentTime) * 1000);
+        const timer = window.setTimeout(() => {
+          uiTimers.delete(timer);
+          setCurrentStep(shownStep);
+        }, delay);
+        uiTimers.add(timer);
+        step = (step + 1) % 8;
+        nextStepTime += stepDuration;
+      }
+    };
+
+    schedule();
+    const id = window.setInterval(schedule, 25);
+    return () => {
+      window.clearInterval(id);
+      for (const timer of uiTimers) window.clearTimeout(timer);
+      setCurrentStep(-1);
+    };
+  }, [sequencerPlaying, sequencerBpm, ensureEngine]);
+
   // --- Recording ----------------------------------------------------------
 
   const startRecording = useCallback(() => {
@@ -576,6 +778,20 @@ export function useMixer(): MixerApi {
         if (prev != null) scratch(side, wrapDelta(prev, position));
       },
       onScratchActive: (side, active) => setScratching(side, active),
+      onBloopPadButton: (row, column, pressed) => {
+        const mode = samplerModeRef.current;
+        if (mode === "sequence") {
+          if (pressed) toggleStep(row, column);
+          return;
+        }
+        const index = row * 8 + column;
+        setUserPressed((prev) => {
+          const next = [...prev];
+          next[index] = pressed;
+          return next;
+        });
+        if (pressed) triggerUserSample(mode === "user1" ? 0 : 1, index);
+      },
       onButton: (index, pressed) => {
         const side: DeckSide = index < 4 ? "left" : "right";
         // Map a hardware button slot to a UI pad. Slot 1 fires Hot 2 and slot 3
@@ -604,7 +820,7 @@ export function useMixer(): MixerApi {
     });
     midiRef.current = controller;
     void controller.connect();
-  }, [ensureEngine, setEq, setVolume, setCrossfader, scratch, setScratching, togglePlay, cue, hotCuePress, hotCueRelease]);
+  }, [ensureEngine, setEq, setVolume, setCrossfader, scratch, setScratching, toggleStep, triggerUserSample, togglePlay, cue, hotCuePress, hotCueRelease]);
 
   // Push play position into state a few times a second for the displays.
   useEffect(() => {
@@ -639,6 +855,28 @@ export function useMixer(): MixerApi {
     midi.setLeds([...ledsFor(left), ...ledsFor(right)]);
   }, [left, right, midiStatus]);
 
+  // Mirror active mode onto all 64 BLOOPPAD RGB LEDs.
+  useEffect(() => {
+    const midi = midiRef.current;
+    if (!midi || midiStatus !== "connected") return;
+    const colors: number[] = [];
+    if (samplerMode === "sequence") {
+      for (let row = 0; row < 8; row++) {
+        for (let column = 0; column < 8; column++) {
+          const active = sequence[row][column];
+          const playhead = sequencerPlaying && column === currentStep;
+          colors.push(playhead ? (active ? 8 : 2) : active ? 9 : samples[row].name ? 5 : 0);
+        }
+      }
+    } else {
+      const bank = userBanks[samplerMode === "user1" ? 0 : 1];
+      for (let index = 0; index < USER_BANK_SIZE; index++) {
+        colors.push(userPressed[index] ? 8 : bank[index].name ? 2 + (Math.floor(index / 8) % 6) : 0);
+      }
+    }
+    midi.setBloopPadLeds(colors);
+  }, [samples, userBanks, userPressed, samplerMode, sequence, sequencerPlaying, currentStep, midiStatus]);
+
   // Tear down on unmount.
   useEffect(() => {
     const covers = coverUrlRef.current;
@@ -658,6 +896,26 @@ export function useMixer(): MixerApi {
       midiStatus,
       midiSupported: typeof navigator !== "undefined" && "requestMIDIAccess" in navigator,
       deviceName,
+      sampler: {
+        samples,
+        userBanks,
+        userPressed,
+        mode: samplerMode,
+        sequence,
+        playing: sequencerPlaying,
+        bpm: sequencerBpm,
+        currentStep,
+        loadSample,
+        loadUserSample,
+        triggerSample,
+        triggerUserSample,
+        setMode: setSamplerMode,
+        toggleStep,
+        setBpm,
+        togglePlaying: toggleSequencer,
+        stop: stopSequencer,
+        clear: clearSequence,
+      },
       recording,
       recordingSupported: typeof window !== "undefined" && "showSaveFilePicker" in window,
       recordingElapsed,
@@ -697,6 +955,6 @@ export function useMixer(): MixerApi {
       stopRecording,
       toggleRecording,
     }),
-    [left, right, crossfader, main, midiStatus, deviceName, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, clearHotCue, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMain, scratch, scratchSeconds, seekBy, setScratching, recording, recordingElapsed, startRecording, stopRecording, toggleRecording, cueDeviceName, selectCueDevice, toggleCue, splitCue, toggleSplitCue],
+    [left, right, crossfader, main, midiStatus, deviceName, samples, userBanks, userPressed, samplerMode, sequence, sequencerPlaying, sequencerBpm, currentStep, loadSample, loadUserSample, triggerSample, triggerUserSample, setSamplerMode, toggleStep, setBpm, toggleSequencer, stopSequencer, clearSequence, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, clearHotCue, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMain, scratch, scratchSeconds, seekBy, setScratching, recording, recordingElapsed, startRecording, stopRecording, toggleRecording, cueDeviceName, selectCueDevice, toggleCue, splitCue, toggleSplitCue],
   );
 }
