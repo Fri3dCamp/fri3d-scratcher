@@ -42,7 +42,8 @@ export const BUTTON_CC: Record<number, number> = {
   0x67: 4, // col 2 row 0 -- bottom row button 4 // deck 2 play
 };
 
-// Firmware LED palette (value sent over CC 0x20..0x27).
+// Firmware LED palette, sent as a raw CC value for the addon LEDs (setLed).
+// The BLOOPPAD-MAXX grid takes direct RGB instead — see setBloopPadLed/setBloopPadLeds.
 export const LED_COLOR = {
   OFF: 0,
   ORANGE_RED: 1,
@@ -61,6 +62,33 @@ const LED_CC_BASE = 0x20;
 // CCs (0x60..0x67), not the logical 0..7 button indices used by onButton.
 // Map logical button index -> physical LED slot.
 const LED_SLOT_FOR_BUTTON = [4, 5, 1, 0, 7, 6, 2, 3] as const;
+
+// SysEx LED RGB protocol: F0 13 37 <led> <red> <green> <blue> [<led> <red> <green> <blue> ...] F7.
+// Multiple <led><red><green><blue> patterns can be packed into a single
+// message to update many LEDs at once. Data bytes are limited to 0x7F, so
+// 8-bit colour components are right-shifted by one bit before being sent.
+type LedRgbEntry = readonly [index: number, r: number, g: number, b: number];
+const SYSEX_MANUFACTURER = [0x13, 0x37];
+const SYSEX_START = 0xf0;
+const SYSEX_END = 0xf7;
+
+function toSysexColorByte(value: number): number {
+  return Math.max(0, Math.min(255, value | 0)) >> 1;
+}
+
+const SATURATION_BOOST = 2.0;
+
+// Push an RGB colour's saturation up by scaling each channel's distance from
+// the colour's mean outward, so it reads vividly on the LEDs (which otherwise
+// look washed out next to their on-screen source colour). Unlike a plain HSL
+// saturation boost — which caps out once a colour hits full saturation — this
+// keeps responding as the boost factor increases, clipping toward pure,
+// neon-bright primaries instead of flattening out.
+function saturateRgb(r: number, g: number, b: number): readonly [number, number, number] {
+  const mean = (r + g + b) / 3;
+  const push = (channel: number) => Math.max(0, Math.min(255, Math.round(mean + (channel - mean) * SATURATION_BOOST)));
+  return [push(r), push(g), push(b)];
+}
 
 // Human-readable names for known CC numbers, for debug logging.
 const CC_NAMES: Record<number, string> = {
@@ -158,7 +186,8 @@ export class MidiController {
   private bloopPadOutput: MIDIOutput | null = null;
   private events: MidiEvents;
   private ledState = new Array<number>(8).fill(-1);
-  private bloopPadLedState = new Array<number>(64).fill(-1);
+  /** Packed (r<<16|g<<8|b) per-LED cache for the BLOOPPAD-MAXX SysEx RGB path. */
+  private bloopPadLedRgbState = new Array<number>(64).fill(-1);
   private bloopPadButtonState = new Array<boolean>(64).fill(false);
   /** Last known pressed state per button index, to debounce duplicate firmware events. */
   private buttonState = new Array<boolean>(8).fill(false);
@@ -181,7 +210,7 @@ export class MidiController {
     }
     this.events.onStatus("connecting");
     try {
-      const access = await navigator.requestMIDIAccess({ sysex: false });
+      const access = await navigator.requestMIDIAccess({ sysex: true });
       this.access = access;
       this.bindInputs();
       this.pickOutputs();
@@ -244,7 +273,7 @@ export class MidiController {
     }
     // Force a full refresh when a controller reconnects.
     this.ledState.fill(-1);
-    this.bloopPadLedState.fill(-1);
+    this.bloopPadLedRgbState.fill(-1);
   }
 
   private handleMessage(event: MIDIMessageEvent, bloopPad: boolean): void {
@@ -337,22 +366,47 @@ export class MidiController {
     for (let i = 0; i < 8; i++) this.setLed(i, colors[i] ?? 0);
   }
 
-  /** Light one BLOOPPAD-MAXX cell using its firmware palette (0..9). */
-  setBloopPadLed(row: number, column: number, color: number): void {
+  /** Light one BLOOPPAD-MAXX cell with a full RGB colour via SysEx. Components are 0..255. */
+  setBloopPadLed(row: number, column: number, r: number, g: number, b: number): void {
     if (row < 0 || row > 7 || column < 0 || column > 7) return;
-    const index = row * 8 + column;
-    if (this.bloopPadLedState[index] === color) return;
-    this.bloopPadLedState[index] = color;
-    const cc = (row << 4) | (0x08 + column);
-    this.bloopPadOutput?.send([0xb0, cc, Math.max(0, Math.min(9, color))]);
+    const arrayIndex = row * 8 + column;
+    const packed = (r << 16) | (g << 8) | b;
+    if (this.bloopPadLedRgbState[arrayIndex] === packed) return;
+    this.bloopPadLedRgbState[arrayIndex] = packed;
+    const wireIndex = (row << 4) | (0x08 + column);
+    this.sendBloopPadRgb([[wireIndex, r, g, b]]);
   }
 
-  /** Push row-major colours for all 64 BLOOPPAD-MAXX LEDs. */
-  setBloopPadLeds(colors: number[]): void {
+  /** Push row-major RGB colours for all 64 BLOOPPAD-MAXX LEDs, as one SysEx message. Components are 0..255. */
+  setBloopPadLeds(colors: readonly (readonly [number, number, number])[]): void {
+    const entries: LedRgbEntry[] = [];
     for (let row = 0; row < 8; row++) {
       for (let column = 0; column < 8; column++) {
-        this.setBloopPadLed(row, column, colors[row * 8 + column] ?? 0);
+        const arrayIndex = row * 8 + column;
+        const [r, g, b] = colors[arrayIndex] ?? [0, 0, 0];
+        const packed = (r << 16) | (g << 8) | b;
+        if (this.bloopPadLedRgbState[arrayIndex] === packed) continue;
+        this.bloopPadLedRgbState[arrayIndex] = packed;
+        entries.push([(row << 4) | (0x08 + column), r, g, b]);
       }
+    }
+    this.sendBloopPadRgb(entries);
+  }
+
+  /** Send one or more <led><r><g><b> patterns to the BLOOPPAD-MAXX in a single SysEx message. */
+  private sendBloopPadRgb(entries: LedRgbEntry[]): void {
+    if (!this.bloopPadOutput || entries.length === 0) return;
+    const saturated: LedRgbEntry[] = entries.map(([index, r, g, b]) => [index, ...saturateRgb(r, g, b)]);
+    const message = [
+      SYSEX_START,
+      ...SYSEX_MANUFACTURER,
+      ...saturated.flatMap(([index, r, g, b]) => [index, toSysexColorByte(r), toSysexColorByte(g), toSysexColorByte(b)]),
+      SYSEX_END,
+    ];
+    this.bloopPadOutput.send(message);
+    if (this.debug) {
+      const summary = saturated.map(([index, r, g, b]) => `${index}:rgb(${r},${g},${b})`).join(" ");
+      console.log(`%c[MIDI →]%c BLOOPPAD sysex ${entries.length} led(s): ${summary}`, "color:#ffad64;font-weight:bold", "color:inherit");
     }
   }
 }

@@ -7,6 +7,21 @@ import { DEFAULT_SAMPLE_NAMES, USER_1_BASE, USER_2_BASE, USER_BANK_SIZE } from "
 import { CC, LED_COLOR, MidiController, wrapDelta } from "./midi";
 import type { MidiStatus } from "./midi";
 
+// RGB equivalents of BloopPad.tsx's per-row TRACK_COLORS Tailwind classes, so the
+// BLOOPPAD-MAXX LEDs match what's on screen. Keep in sync.
+const TRACK_COLORS_RGB: readonly [number, number, number][] = [
+  [192, 133, 255], // bg-fri3d-purple-light
+  [255, 173, 100], // bg-fri3d-orange
+  [60, 232, 179], // bg-fri3d-mint
+  [255, 62, 62], // bg-fri3d-red
+  [96, 165, 250], // bg-blue-400
+  [244, 114, 182], // bg-pink-400
+  [253, 224, 71], // bg-yellow-300
+  [103, 232, 249], // bg-cyan-300
+];
+const GRID_OFF_RGB: readonly [number, number, number] = [0, 0, 0]; // LED off
+const PLAYHEAD_RGB: readonly [number, number, number] = [255, 255, 255]; // full white
+
 export interface DeckState {
   trackName: string | null;
   /** ID3/metadata title, falls back to the file name. */
@@ -855,27 +870,28 @@ export function useMixer(): MixerApi {
     midi.setLeds([...ledsFor(left), ...ledsFor(right)]);
   }, [left, right, midiStatus]);
 
-  // Mirror active mode onto all 64 BLOOPPAD RGB LEDs.
+  // Mirror active mode onto all 64 BLOOPPAD RGB LEDs, matching each pad's on-screen background
+  // colour, with the playhead column lit full white. Keep in sync with TRACK_COLORS in BloopPad.tsx.
   useEffect(() => {
     const midi = midiRef.current;
     if (!midi || midiStatus !== "connected") return;
-    const colors: number[] = [];
+    const colors: Array<readonly [number, number, number]> = [];
     if (samplerMode === "sequence") {
       for (let row = 0; row < 8; row++) {
         for (let column = 0; column < 8; column++) {
           const active = sequence[row][column];
           const playhead = sequencerPlaying && column === currentStep;
-          colors.push(playhead ? (active ? 8 : 2) : active ? 9 : samples[row].name ? 5 : 0);
+          colors.push(playhead ? PLAYHEAD_RGB : active ? TRACK_COLORS_RGB[row] : GRID_OFF_RGB);
         }
       }
     } else {
       const bank = userBanks[samplerMode === "user1" ? 0 : 1];
       for (let index = 0; index < USER_BANK_SIZE; index++) {
-        colors.push(userPressed[index] ? 8 : bank[index].name ? 2 + (Math.floor(index / 8) % 6) : 0);
+        colors.push(bank[index].name ? TRACK_COLORS_RGB[Math.floor(index / 8)] : GRID_OFF_RGB);
       }
     }
     midi.setBloopPadLeds(colors);
-  }, [samples, userBanks, userPressed, samplerMode, sequence, sequencerPlaying, currentStep, midiStatus]);
+  }, [userBanks, samplerMode, sequence, sequencerPlaying, currentStep, midiStatus]);
 
   // Tear down on unmount.
   useEffect(() => {
