@@ -206,6 +206,7 @@ export function useMixer(): MixerApi {
   const userBanksRef = useRef<[SampleSlot[], SampleSlot[]]>([[], []]);
   const sequencerPlayingRef = useRef(false);
   const currentStepRef = useRef(-1);
+  const nextStepRef = useRef(0);
   const sampleLoadRef = useRef<number[]>(new Array<number>(USER_2_BASE + USER_BANK_SIZE).fill(0));
   const scratchPosRef = useRef<{ left: number | null; right: number | null }>({
     left: null,
@@ -629,6 +630,7 @@ export function useMixer(): MixerApi {
   const stopSequencer = useCallback(() => {
     setSequencerPlaying(false);
     setCurrentStep(-1);
+    nextStepRef.current = 0;
     engineRef.current?.sampler.stopAll();
   }, []);
 
@@ -649,7 +651,7 @@ export function useMixer(): MixerApi {
     const engine = ensureEngine();
     const stepDuration = 30 / sequencerBpm; // eighth notes
     let nextStepTime = engine.ctx.currentTime + 0.05;
-    let step = 0;
+    let step = nextStepRef.current;
     const uiTimers = new Set<number>();
 
     const schedule = () => {
@@ -665,6 +667,7 @@ export function useMixer(): MixerApi {
         }, delay);
         uiTimers.add(timer);
         step = (step + 1) % 8;
+        nextStepRef.current = step;
         nextStepTime += stepDuration;
       }
     };
@@ -674,7 +677,6 @@ export function useMixer(): MixerApi {
     return () => {
       window.clearInterval(id);
       for (const timer of uiTimers) window.clearTimeout(timer);
-      setCurrentStep(-1);
     };
   }, [sequencerPlaying, sequencerBpm, ensureEngine]);
 

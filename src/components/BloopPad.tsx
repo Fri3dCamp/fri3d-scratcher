@@ -126,7 +126,7 @@ function Sequencer({ sampler }: BloopPadProps) {
               </div>
 
               {sampler.sequence[row].map((active, column) => {
-                const playhead = sampler.playing && sampler.currentStep === column;
+                const playhead = sampler.currentStep === column;
                 return (
                   <button
                     key={column}
