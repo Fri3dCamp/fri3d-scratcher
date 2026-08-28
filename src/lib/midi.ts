@@ -90,6 +90,15 @@ function saturateRgb(r: number, g: number, b: number): readonly [number, number,
   return [push(r), push(g), push(b)];
 }
 
+// Full-saturation, full-brightness HSV -> RGB, used for the BLOOPPAD-MAXX connect animation.
+function hueToRgb(hueDeg: number): readonly [number, number, number] {
+  const h = ((hueDeg % 360) + 360) % 360;
+  const x = 255 * (1 - Math.abs(((h / 60) % 2) - 1));
+  const [r, g, b] =
+    h < 60 ? [255, x, 0] : h < 120 ? [x, 255, 0] : h < 180 ? [0, 255, x] : h < 240 ? [0, x, 255] : h < 300 ? [x, 0, 255] : [255, 0, x];
+  return [Math.round(r), Math.round(g), Math.round(b)];
+}
+
 // Human-readable names for known CC numbers, for debug logging.
 const CC_NAMES: Record<number, string> = {
   [CC.LEFT_TOP]: "LEFT_TOP (low)",
@@ -176,6 +185,8 @@ export interface MidiEvents {
   onButton(index: number, pressed: boolean): void;
   /** A BLOOPPAD-MAXX grid button changed. */
   onBloopPadButton?(row: number, column: number, pressed: boolean): void;
+  /** A BLOOPPAD-MAXX finished its connect animation; push real LED state via setBloopPadLeds. */
+  onBloopPadConnected?(): void;
   /** Connection / device status changed. */
   onStatus(status: MidiStatus, deviceName?: string): void;
 }
@@ -184,6 +195,8 @@ export class MidiController {
   private access: MIDIAccess | null = null;
   private output: MIDIOutput | null = null;
   private bloopPadOutput: MIDIOutput | null = null;
+  /** Bumped whenever bloopPadOutput actually changes, to invalidate any in-flight connect animation. */
+  private bloopPadGeneration = 0;
   private events: MidiEvents;
   private ledState = new Array<number>(8).fill(-1);
   /** Packed (r<<16|g<<8|b) per-LED cache for the BLOOPPAD-MAXX SysEx RGB path. */
@@ -261,19 +274,34 @@ export class MidiController {
   }
 
   private pickOutputs(): void {
-    this.output = null;
-    this.bloopPadOutput = null;
-    if (!this.access) return;
-    this.output = pickBestPort(this.access.outputs.values());
-    for (const output of this.access.outputs.values()) {
-      if (isBloopPadPort(output)) {
-        this.bloopPadOutput = output;
-        break;
+    this.output = this.access ? pickBestPort(this.access.outputs.values()) : null;
+
+    let bloopPadOutput: MIDIOutput | null = null;
+    if (this.access) {
+      for (const candidate of this.access.outputs.values()) {
+        if (isBloopPadPort(candidate)) {
+          bloopPadOutput = candidate;
+          break;
+        }
       }
     }
+
+    // Only touch bloopPadOutput (and its generation) when the resolved port actually
+    // changes — access.onstatechange can fire multiple times for one physical hotplug
+    // (composite USB-MIDI devices enumerate input/output separately), and briefly
+    // nulling bloopPadOutput on every one of those would kill an in-flight connect
+    // animation for no reason.
+    const bloopPadChanged = bloopPadOutput !== this.bloopPadOutput;
+    if (bloopPadChanged) {
+      this.bloopPadOutput = bloopPadOutput;
+      this.bloopPadGeneration++;
+    }
+
     // Force a full refresh when a controller reconnects.
     this.ledState.fill(-1);
     this.bloopPadLedRgbState.fill(-1);
+
+    if (bloopPadChanged && bloopPadOutput !== null) this.playBloopPadConnectAnimation();
   }
 
   private handleMessage(event: MIDIMessageEvent, bloopPad: boolean): void {
@@ -393,9 +421,58 @@ export class MidiController {
     this.sendBloopPadRgb(entries);
   }
 
+  /**
+   * Wave a rainbow across the BLOOPPAD-MAXX grid, every LED lit the whole
+   * time: each cell's hue is set by its diagonal distance from corner (0,0)
+   * minus a phase that advances every frame, so the colours themselves flow
+   * from corner (0,0) to the opposite corner (7,7) rather than LEDs blinking
+   * on/off. Brightness fades in over rampMs, holds at full brightness for
+   * holdMs, then fades back out over rampMs, before every LED turns off.
+   * Calls the onBloopPadConnected event once finished so callers can repaint
+   * real state.
+   */
+  private playBloopPadConnectAnimation(): void {
+    const generation = this.bloopPadGeneration;
+    const maxDistance = 14; // row + column at the far corner (7,7)
+    const frameDelayMs = 10;
+    const rampMs = 700; // fade-in / fade-out duration
+    const holdMs = 1; // full-brightness hold between the two fades
+    const cycles = 1; // full colour-wheel rotations across the whole animation
+    const rampFrames = Math.round(rampMs / frameDelayMs);
+    const totalFrames = rampFrames * 2 + Math.round(holdMs / frameDelayMs);
+    const degreesPerFrame = (360 * cycles) / totalFrames; // hue shift per frame — how fast the colours flow
+    let frameIndex = 0;
+    let phase = 0;
+    const frame = () => {
+      if (this.bloopPadGeneration !== generation) return; // disconnected / replaced mid-animation
+      const brightness =
+        frameIndex < rampFrames ? frameIndex / rampFrames : Math.min(1, (totalFrames - frameIndex) / rampFrames);
+      const colors: Array<readonly [number, number, number]> = [];
+      for (let row = 0; row < 8; row++) {
+        for (let column = 0; column < 8; column++) {
+          const distance = row + column;
+          const [r, g, b] = hueToRgb((distance / maxDistance) * 360 - phase);
+          colors.push([Math.round(r * brightness), Math.round(g * brightness), Math.round(b * brightness)]);
+        }
+      }
+      this.setBloopPadLeds(colors);
+
+      if (frameIndex < totalFrames) {
+        frameIndex++;
+        phase += degreesPerFrame;
+        setTimeout(frame, frameDelayMs);
+        return;
+      }
+      this.setBloopPadLeds(Array.from({ length: 64 }, () => [0, 0, 0] as const));
+      this.events.onBloopPadConnected?.();
+    };
+    frame();
+  }
+
   /** Send one or more <led><r><g><b> patterns to the BLOOPPAD-MAXX in a single SysEx message. */
   private sendBloopPadRgb(entries: LedRgbEntry[]): void {
-    if (!this.bloopPadOutput || entries.length === 0) return;
+    const output = this.bloopPadOutput;
+    if (!output || entries.length === 0) return;
     const saturated: LedRgbEntry[] = entries.map(([index, r, g, b]) => [index, ...saturateRgb(r, g, b)]);
     const message = [
       SYSEX_START,
@@ -403,7 +480,7 @@ export class MidiController {
       ...saturated.flatMap(([index, r, g, b]) => [index, toSysexColorByte(r), toSysexColorByte(g), toSysexColorByte(b)]),
       SYSEX_END,
     ];
-    this.bloopPadOutput.send(message);
+    output.send(message);
     if (this.debug) {
       const summary = saturated.map(([index, r, g, b]) => `${index}:rgb(${r},${g},${b})`).join(" ");
       console.log(`%c[MIDI →]%c BLOOPPAD sysex ${entries.length} led(s): ${summary}`, "color:#ffad64;font-weight:bold", "color:inherit");

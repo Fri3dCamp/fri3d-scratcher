@@ -200,6 +200,12 @@ export function useMixer(): MixerApi {
   const midiRef = useRef<MidiController | null>(null);
   const sequenceRef = useRef<boolean[][]>(emptySequence());
   const samplerModeRef = useRef<SamplerMode>("sequence");
+  // Mirrors of state read by computeBloopPadColors, so it can be called from a
+  // stable MIDI event handler (the BLOOPPAD-MAXX connect animation callback)
+  // without capturing stale values.
+  const userBanksRef = useRef<[SampleSlot[], SampleSlot[]]>([[], []]);
+  const sequencerPlayingRef = useRef(false);
+  const currentStepRef = useRef(-1);
   const sampleLoadRef = useRef<number[]>(new Array<number>(USER_2_BASE + USER_BANK_SIZE).fill(0));
   const scratchPosRef = useRef<{ left: number | null; right: number | null }>({
     left: null,
@@ -748,6 +754,28 @@ export function useMixer(): MixerApi {
 
   // --- MIDI ---------------------------------------------------------------
 
+  // Current 64-cell BLOOPPAD-MAXX colours, matching each pad's on-screen background colour,
+  // with the playhead column lit full white. Keep in sync with TRACK_COLORS in BloopPad.tsx.
+  // Reads refs (not state) so it can be called from the stable onBloopPadConnected handler below.
+  const computeBloopPadColors = useCallback((): Array<readonly [number, number, number]> => {
+    const colors: Array<readonly [number, number, number]> = [];
+    if (samplerModeRef.current === "sequence") {
+      for (let row = 0; row < 8; row++) {
+        for (let column = 0; column < 8; column++) {
+          const active = sequenceRef.current[row][column];
+          const playhead = sequencerPlayingRef.current && column === currentStepRef.current;
+          colors.push(playhead ? PLAYHEAD_RGB : active ? TRACK_COLORS_RGB[row] : GRID_OFF_RGB);
+        }
+      }
+    } else {
+      const bank = userBanksRef.current[samplerModeRef.current === "user1" ? 0 : 1];
+      for (let index = 0; index < USER_BANK_SIZE; index++) {
+        colors.push(bank[index].name ? TRACK_COLORS_RGB[Math.floor(index / 8)] : GRID_OFF_RGB);
+      }
+    }
+    return colors;
+  }, []);
+
   const connectMidi = useCallback(() => {
     ensureEngine();
     const controller = new MidiController({
@@ -793,6 +821,9 @@ export function useMixer(): MixerApi {
         if (prev != null) scratch(side, wrapDelta(prev, position));
       },
       onScratchActive: (side, active) => setScratching(side, active),
+      onBloopPadConnected: () => {
+        midiRef.current?.setBloopPadLeds(computeBloopPadColors());
+      },
       onBloopPadButton: (row, column, pressed) => {
         const mode = samplerModeRef.current;
         if (mode === "sequence") {
@@ -835,7 +866,21 @@ export function useMixer(): MixerApi {
     });
     midiRef.current = controller;
     void controller.connect();
-  }, [ensureEngine, setEq, setVolume, setCrossfader, scratch, setScratching, toggleStep, triggerUserSample, togglePlay, cue, hotCuePress, hotCueRelease]);
+  }, [
+    ensureEngine,
+    setEq,
+    setVolume,
+    setCrossfader,
+    scratch,
+    setScratching,
+    computeBloopPadColors,
+    toggleStep,
+    triggerUserSample,
+    togglePlay,
+    cue,
+    hotCuePress,
+    hotCueRelease,
+  ]);
 
   // Push play position into state a few times a second for the displays.
   useEffect(() => {
@@ -870,28 +915,20 @@ export function useMixer(): MixerApi {
     midi.setLeds([...ledsFor(left), ...ledsFor(right)]);
   }, [left, right, midiStatus]);
 
-  // Mirror active mode onto all 64 BLOOPPAD RGB LEDs, matching each pad's on-screen background
-  // colour, with the playhead column lit full white. Keep in sync with TRACK_COLORS in BloopPad.tsx.
+  // Keep read-only mirrors of state that computeBloopPadColors needs to read
+  // from the stable onBloopPadConnected handler (see connectMidi below).
+  useEffect(() => {
+    userBanksRef.current = userBanks;
+    sequencerPlayingRef.current = sequencerPlaying;
+    currentStepRef.current = currentStep;
+  }, [userBanks, sequencerPlaying, currentStep]);
+
+  // Mirror active mode onto all 64 BLOOPPAD RGB LEDs whenever it changes.
   useEffect(() => {
     const midi = midiRef.current;
     if (!midi || midiStatus !== "connected") return;
-    const colors: Array<readonly [number, number, number]> = [];
-    if (samplerMode === "sequence") {
-      for (let row = 0; row < 8; row++) {
-        for (let column = 0; column < 8; column++) {
-          const active = sequence[row][column];
-          const playhead = sequencerPlaying && column === currentStep;
-          colors.push(playhead ? PLAYHEAD_RGB : active ? TRACK_COLORS_RGB[row] : GRID_OFF_RGB);
-        }
-      }
-    } else {
-      const bank = userBanks[samplerMode === "user1" ? 0 : 1];
-      for (let index = 0; index < USER_BANK_SIZE; index++) {
-        colors.push(bank[index].name ? TRACK_COLORS_RGB[Math.floor(index / 8)] : GRID_OFF_RGB);
-      }
-    }
-    midi.setBloopPadLeds(colors);
-  }, [userBanks, samplerMode, sequence, sequencerPlaying, currentStep, midiStatus]);
+    midi.setBloopPadLeds(computeBloopPadColors());
+  }, [userBanks, samplerMode, sequence, sequencerPlaying, currentStep, midiStatus, computeBloopPadColors]);
 
   // Tear down on unmount.
   useEffect(() => {
