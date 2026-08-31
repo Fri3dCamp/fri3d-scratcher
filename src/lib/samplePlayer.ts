@@ -104,9 +104,9 @@ export class SamplePlayer {
       return (squareA + squareB * 0.75) * Math.exp(-time * 13) * 0.38;
     });
 
-    // User 1 opens with the drum kit across its first row. All remaining User
+    // User 1 opens with the drum kit down its first column. All remaining User
     // 1 pads and all User 2 pads are free for user audio.
-    for (let index = 0; index < 8; index++) this.buffers[USER_1_BASE + index] = this.buffers[index];
+    for (let index = 0; index < 8; index++) this.buffers[USER_1_BASE + index * 8] = this.buffers[index];
   }
 
   setBuffer(index: number, buffer: AudioBuffer): void {

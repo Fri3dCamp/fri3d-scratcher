@@ -119,7 +119,7 @@ const emptyUserBank = (): SampleSlot[] =>
 const defaultUserBanks = (): [SampleSlot[], SampleSlot[]] => {
   const user1 = emptyUserBank();
   DEFAULT_SAMPLE_NAMES.forEach((name, index) => {
-    user1[index] = { name, loading: false, error: false };
+    user1[index * 8] = { name, loading: false, error: false };
   });
   return [user1, emptyUserBank()];
 };
