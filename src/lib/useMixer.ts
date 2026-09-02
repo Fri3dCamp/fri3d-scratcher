@@ -4,7 +4,7 @@ import { parseBlob, selectCover } from "music-metadata";
 import { computeDetailPeaks, computePeaks, MixerEngine } from "./audio";
 import type { DeckSide, EqBand } from "./audio";
 import { DEFAULT_SAMPLE_NAMES, USER_1_BASE, USER_2_BASE, USER_BANK_SIZE } from "./samplePlayer";
-import { CC, LED_COLOR, MidiController, wrapDelta } from "./midi";
+import { CC, MidiController, wrapDelta } from "./midi";
 import type { MidiStatus } from "./midi";
 
 // RGB equivalents of BloopPad.tsx's per-row TRACK_COLORS Tailwind classes, so the
@@ -21,6 +21,30 @@ const TRACK_COLORS_RGB: readonly [number, number, number][] = [
 ];
 const GRID_OFF_RGB: readonly [number, number, number] = [0, 0, 0]; // LED off
 const PLAYHEAD_RGB: readonly [number, number, number] = [255, 255, 255]; // full white
+
+// DJ addon per-deck button LED colours, matching the on-screen pad colours.
+const PLAY_BUTTON_RGB: readonly [number, number, number] = [253, 224, 71]; // bg-yellow-300
+const CUE_BUTTON_RGB: readonly [number, number, number] = [255, 173, 100]; // bg-fri3d-orange
+const HOTCUE_BUTTON_RGB: readonly [number, number, number] = [192, 133, 255]; // bg-fri3d-purple-light
+const ADDON_LED_OFF_RGB: readonly [number, number, number] = [0, 0, 0];
+// How fast the play LED blinks while a deck is playing.
+const PLAY_BLINK_INTERVAL_MS = 300;
+
+// Physical layout of the DJ addon's 8 buttons/LEDs (two rows of 4, index 0..7
+// matching MidiController's onButton index and setAddonLeds array position):
+//   row 0:  Cue L  · Hot 2 L · Hot 2 R · Cue R
+//   row 1:  Play L · Hot 1 L · Hot 1 R · Play R
+// pad follows the same numbering used for DeckState.padsPressed: 0 Play · 1 Hot 2 · 2 Hot 1 · 3 Cue.
+const BUTTON_LAYOUT: ReadonlyArray<readonly [side: DeckSide, pad: number]> = [
+  ["left", 3], // 0: Cue L
+  ["left", 2], // 1: Hot 2 L
+  ["right", 2], // 2: Hot 2 R
+  ["right", 3], // 3: Cue R
+  ["left", 0], // 4: Play L
+  ["left", 1], // 5: Hot 1 L
+  ["right", 1], // 6: Hot 1 R
+  ["right", 0], // 7: Play R
+];
 
 export interface DeckState {
   trackName: string | null;
@@ -132,6 +156,8 @@ export interface MixerApi {
   midiStatus: MidiStatus;
   midiSupported: boolean;
   deviceName?: string;
+  /** Current phase of the play-LED blink (on/off), for UI to mirror the hardware LED. */
+  playBlinkOn: boolean;
   sampler: SamplerApi;
 
   /** Whether the master output is currently being recorded. */
@@ -234,6 +260,8 @@ export function useMixer(): MixerApi {
   const [sequencerPlaying, setSequencerPlaying] = useState(false);
   const [sequencerBpm, setSequencerBpm] = useState(120);
   const [currentStep, setCurrentStep] = useState(-1);
+  // Toggled on an interval while a deck is playing, to blink its play LED.
+  const [playBlinkOn, setPlayBlinkOn] = useState(true);
   const [recording, setRecording] = useState(false);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   // Wall-clock time the current recording started, for the elapsed counter.
@@ -841,11 +869,7 @@ export function useMixer(): MixerApi {
         if (pressed) triggerUserSample(mode === "user1" ? 0 : 1, index);
       },
       onButton: (index, pressed) => {
-        const side: DeckSide = index < 4 ? "left" : "right";
-        // Map a hardware button slot to a UI pad. Slot 1 fires Hot 2 and slot 3
-        // fires Cue (Cue and Hot 2 swapped vs. the UI's Play/Cue/Hot1/Hot2 order).
-        const PAD_FOR_BUTTON = [0, 3, 2, 1] as const;
-        const pad = PAD_FOR_BUTTON[index % 4];
+        const [side, pad] = BUTTON_LAYOUT[index];
         // Reflect the physical press as a visual pad animation.
         const setter = side === "left" ? setLeft : setRight;
         setter((prev) => {
@@ -853,10 +877,9 @@ export function useMixer(): MixerApi {
           padsPressed[pad] = pressed;
           return { ...prev, padsPressed };
         });
-        // UI pads: 0 Play · 1 Cue · 2 Hot 1 · 3 Hot 2
         if (pad === 0) {
           if (pressed) togglePlay(side);
-        } else if (pad === 1) {
+        } else if (pad === 3) {
           if (pressed) cue(side);
         } else {
           // Hot cues: park on press, play on release (hardware has no shift).
@@ -903,19 +926,30 @@ export function useMixer(): MixerApi {
     return () => window.clearInterval(id);
   }, []);
 
+  // Blink the play LED while either deck is playing.
+  useEffect(() => {
+    if (!left.playing && !right.playing) return;
+    const id = window.setInterval(() => setPlayBlinkOn((on) => !on), PLAY_BLINK_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [left.playing, right.playing]);
+
   // Mirror deck/pad state onto the controller LEDs.
   useEffect(() => {
     const midi = midiRef.current;
     if (!midi || midiStatus !== "connected") return;
-    // LED order matches the pad order: Play · Hot 2 · Hot 1 · Cue
-    const ledsFor = (d: DeckState): number[] => [
-      d.playing ? LED_COLOR.GREEN : d.trackName ? LED_COLOR.WARM_WHITE : LED_COLOR.OFF,
-      d.hotCues[1] != null ? LED_COLOR.ORANGE_RED : LED_COLOR.OFF,
-      d.hotCues[0] != null ? LED_COLOR.BLUE : LED_COLOR.OFF,
-      d.trackName ? LED_COLOR.TEAL : LED_COLOR.OFF,
+    // Colour for each pad (0 Play · 1 Hot 2 · 2 Hot 1 · 3 Cue), matching padsPressed's numbering.
+    const padColors = (d: DeckState): Array<readonly [number, number, number]> => [
+      d.playing ? (playBlinkOn ? PLAY_BUTTON_RGB : ADDON_LED_OFF_RGB) : d.trackName ? PLAY_BUTTON_RGB : ADDON_LED_OFF_RGB,
+      d.hotCues[1] != null ? HOTCUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
+      d.hotCues[0] != null ? HOTCUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
+      d.trackName ? CUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
     ];
-    midi.setLeds([...ledsFor(left), ...ledsFor(right)]);
-  }, [left, right, midiStatus]);
+    const leftColors = padColors(left);
+    const rightColors = padColors(right);
+    // Place each pad's colour at its physical LED slot per BUTTON_LAYOUT.
+    const leds = BUTTON_LAYOUT.map(([side, pad]) => (side === "left" ? leftColors : rightColors)[pad]);
+    midi.setAddonLeds(leds);
+  }, [left, right, midiStatus, playBlinkOn]);
 
   // Keep read-only mirrors of state that computeBloopPadColors needs to read
   // from the stable onBloopPadConnected handler (see connectMidi below).
@@ -951,6 +985,7 @@ export function useMixer(): MixerApi {
       midiStatus,
       midiSupported: typeof navigator !== "undefined" && "requestMIDIAccess" in navigator,
       deviceName,
+      playBlinkOn,
       sampler: {
         samples,
         userBanks,
@@ -1010,6 +1045,6 @@ export function useMixer(): MixerApi {
       stopRecording,
       toggleRecording,
     }),
-    [left, right, crossfader, main, midiStatus, deviceName, samples, userBanks, userPressed, samplerMode, sequence, sequencerPlaying, sequencerBpm, currentStep, loadSample, loadUserSample, triggerSample, triggerUserSample, setSamplerMode, toggleStep, setBpm, toggleSequencer, stopSequencer, clearSequence, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, clearHotCue, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMain, scratch, scratchSeconds, seekBy, setScratching, recording, recordingElapsed, startRecording, stopRecording, toggleRecording, cueDeviceName, selectCueDevice, toggleCue, splitCue, toggleSplitCue],
+    [left, right, crossfader, main, midiStatus, deviceName, playBlinkOn, samples, userBanks, userPressed, samplerMode, sequence, sequencerPlaying, sequencerBpm, currentStep, loadSample, loadUserSample, triggerSample, triggerUserSample, setSamplerMode, toggleStep, setBpm, toggleSequencer, stopSequencer, clearSequence, connectMidi, loadFile, togglePlay, cue, hotCuePress, hotCueRelease, clearHotCue, seek, sync, applyTempo, resetTempo, getTime, getDetailPeaks, setEq, setVolume, setCrossfader, setMain, scratch, scratchSeconds, seekBy, setScratching, recording, recordingElapsed, startRecording, stopRecording, toggleRecording, cueDeviceName, selectCueDevice, toggleCue, splitCue, toggleSplitCue],
   );
 }
