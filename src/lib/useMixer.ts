@@ -232,6 +232,12 @@ export function useMixer(): MixerApi {
   const userBanksRef = useRef<[SampleSlot[], SampleSlot[]]>([[], []]);
   const sequencerPlayingRef = useRef(false);
   const currentStepRef = useRef(-1);
+  // Mirrors of deck/blink state read by computeAddonLedColors, so it can be called
+  // from the stable onAddonConnected handler (the DJ addon connect animation callback)
+  // without capturing stale values.
+  const leftRef = useRef<DeckState>(initialDeck());
+  const rightRef = useRef<DeckState>(initialDeck());
+  const playBlinkOnRef = useRef(true);
   const nextStepRef = useRef(0);
   const sampleLoadRef = useRef<number[]>(new Array<number>(USER_2_BASE + USER_BANK_SIZE).fill(0));
   const scratchPosRef = useRef<{ left: number | null; right: number | null }>({
@@ -806,6 +812,28 @@ export function useMixer(): MixerApi {
     return colors;
   }, []);
 
+  // Current 8-LED DJ addon colours, placed at each pad's physical LED slot per
+  // BUTTON_LAYOUT. Reads refs (not state) so it can be called from the stable
+  // onAddonConnected handler below.
+  const computeAddonLedColors = useCallback((): Array<readonly [number, number, number]> => {
+    // Colour for each pad (0 Play · 1 Hot 2 · 2 Hot 1 · 3 Cue), matching padsPressed's numbering.
+    const padColors = (d: DeckState): Array<readonly [number, number, number]> => [
+      d.playing
+        ? playBlinkOnRef.current
+          ? PLAY_BUTTON_RGB
+          : ADDON_LED_OFF_RGB
+        : d.trackName
+          ? PLAY_BUTTON_RGB
+          : ADDON_LED_OFF_RGB,
+      d.hotCues[1] != null ? HOTCUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
+      d.hotCues[0] != null ? HOTCUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
+      d.trackName ? CUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
+    ];
+    const leftColors = padColors(leftRef.current);
+    const rightColors = padColors(rightRef.current);
+    return BUTTON_LAYOUT.map(([side, pad]) => (side === "left" ? leftColors : rightColors)[pad]);
+  }, []);
+
   const connectMidi = useCallback(() => {
     ensureEngine();
     const controller = new MidiController({
@@ -851,6 +879,9 @@ export function useMixer(): MixerApi {
         if (prev != null) scratch(side, wrapDelta(prev, position));
       },
       onScratchActive: (side, active) => setScratching(side, active),
+      onAddonConnected: () => {
+        midiRef.current?.setAddonLeds(computeAddonLedColors());
+      },
       onBloopPadConnected: () => {
         midiRef.current?.setBloopPadLeds(computeBloopPadColors());
       },
@@ -898,6 +929,7 @@ export function useMixer(): MixerApi {
     setCrossfader,
     scratch,
     setScratching,
+    computeAddonLedColors,
     computeBloopPadColors,
     toggleStep,
     triggerUserSample,
@@ -937,27 +969,19 @@ export function useMixer(): MixerApi {
   useEffect(() => {
     const midi = midiRef.current;
     if (!midi || midiStatus !== "connected") return;
-    // Colour for each pad (0 Play · 1 Hot 2 · 2 Hot 1 · 3 Cue), matching padsPressed's numbering.
-    const padColors = (d: DeckState): Array<readonly [number, number, number]> => [
-      d.playing ? (playBlinkOn ? PLAY_BUTTON_RGB : ADDON_LED_OFF_RGB) : d.trackName ? PLAY_BUTTON_RGB : ADDON_LED_OFF_RGB,
-      d.hotCues[1] != null ? HOTCUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
-      d.hotCues[0] != null ? HOTCUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
-      d.trackName ? CUE_BUTTON_RGB : ADDON_LED_OFF_RGB,
-    ];
-    const leftColors = padColors(left);
-    const rightColors = padColors(right);
-    // Place each pad's colour at its physical LED slot per BUTTON_LAYOUT.
-    const leds = BUTTON_LAYOUT.map(([side, pad]) => (side === "left" ? leftColors : rightColors)[pad]);
-    midi.setAddonLeds(leds);
-  }, [left, right, midiStatus, playBlinkOn]);
+    midi.setAddonLeds(computeAddonLedColors());
+  }, [left, right, midiStatus, playBlinkOn, computeAddonLedColors]);
 
-  // Keep read-only mirrors of state that computeBloopPadColors needs to read
-  // from the stable onBloopPadConnected handler (see connectMidi below).
+  // Keep read-only mirrors of state that computeBloopPadColors/computeAddonLedColors need to
+  // read from their stable onBloopPadConnected/onAddonConnected handlers (see connectMidi below).
   useEffect(() => {
     userBanksRef.current = userBanks;
     sequencerPlayingRef.current = sequencerPlaying;
     currentStepRef.current = currentStep;
-  }, [userBanks, sequencerPlaying, currentStep]);
+    leftRef.current = left;
+    rightRef.current = right;
+    playBlinkOnRef.current = playBlinkOn;
+  }, [userBanks, sequencerPlaying, currentStep, left, right, playBlinkOn]);
 
   // Mirror active mode onto all 64 BLOOPPAD RGB LEDs whenever it changes.
   useEffect(() => {

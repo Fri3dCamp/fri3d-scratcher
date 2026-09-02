@@ -156,6 +156,8 @@ export interface MidiEvents {
   onButton(index: number, pressed: boolean): void;
   /** A BLOOPPAD-MAXX grid button changed. */
   onBloopPadButton?(row: number, column: number, pressed: boolean): void;
+  /** The DJ addon finished its connect animation; push real LED state via setAddonLeds. */
+  onAddonConnected?(): void;
   /** A BLOOPPAD-MAXX finished its connect animation; push real LED state via setBloopPadLeds. */
   onBloopPadConnected?(): void;
   /** Connection / device status changed. */
@@ -166,6 +168,8 @@ export class MidiController {
   private access: MIDIAccess | null = null;
   private output: MIDIOutput | null = null;
   private bloopPadOutput: MIDIOutput | null = null;
+  /** Bumped whenever output actually changes, to invalidate any in-flight connect animation. */
+  private addonGeneration = 0;
   /** Bumped whenever bloopPadOutput actually changes, to invalidate any in-flight connect animation. */
   private bloopPadGeneration = 0;
   private events: MidiEvents;
@@ -246,7 +250,7 @@ export class MidiController {
   }
 
   private pickOutputs(): void {
-    this.output = this.access ? pickBestPort(this.access.outputs.values()) : null;
+    const output = this.access ? pickBestPort(this.access.outputs.values()) : null;
 
     let bloopPadOutput: MIDIOutput | null = null;
     if (this.access) {
@@ -258,11 +262,16 @@ export class MidiController {
       }
     }
 
-    // Only touch bloopPadOutput (and its generation) when the resolved port actually
-    // changes — access.onstatechange can fire multiple times for one physical hotplug
-    // (composite USB-MIDI devices enumerate input/output separately), and briefly
-    // nulling bloopPadOutput on every one of those would kill an in-flight connect
-    // animation for no reason.
+    // Only touch output/bloopPadOutput (and their generations) when the resolved port
+    // actually changes — access.onstatechange can fire multiple times for one physical
+    // hotplug (composite USB-MIDI devices enumerate input/output separately), and briefly
+    // nulling them on every one of those would kill an in-flight connect animation for
+    // no reason.
+    const addonChanged = output !== this.output;
+    if (addonChanged) {
+      this.output = output;
+      this.addonGeneration++;
+    }
     const bloopPadChanged = bloopPadOutput !== this.bloopPadOutput;
     if (bloopPadChanged) {
       this.bloopPadOutput = bloopPadOutput;
@@ -273,6 +282,10 @@ export class MidiController {
     this.addonLedRgbState.fill(-1);
     this.bloopPadLedRgbState.fill(-1);
 
+    if (addonChanged && output !== null) {
+      this.requestCurrentValues();
+      this.playAddonConnectAnimation();
+    }
     if (bloopPadChanged && bloopPadOutput !== null) this.playBloopPadConnectAnimation();
   }
 
@@ -367,6 +380,61 @@ export class MidiController {
       entries.push([LED_CC_BASE + index, r, g, b]);
     }
     this.sendRgbSysex(this.output, entries, "addon");
+  }
+
+  /**
+   * Chase a comet around the DJ addon's 8 LEDs in a circle: top row left→right,
+   * then bottom row right→left, so the sweep wraps smoothly around the 2×4
+   * grid's perimeter instead of jumping across it. The head LED plus its 2
+   * trailing LEDs are lit in the same (colour-wheel-advancing) hue, dimming
+   * with distance for a comet-tail look. Turns every LED off at the end and
+   * calls the onAddonConnected event so callers can repaint real state.
+   */
+  private playAddonConnectAnimation(): void {
+    const generation = this.addonGeneration;
+    const path = [0, 1, 2, 3, 7, 6, 5, 4];
+    const tailBrightness = [1, 0.5, 0.2]; // head, then each LED behind it
+    const laps = 3;
+    const stepDelayMs = 80;
+    const totalSteps = path.length * laps;
+    const degreesPerStep = 360 / path.length; // one full colour-wheel rotation per lap
+    let step = 0;
+    const frame = () => {
+      if (this.addonGeneration !== generation) return; // disconnected / replaced mid-animation
+      const [r, g, b] = hueToRgb(step * degreesPerStep);
+      const colors = Array.from({ length: 8 }, () => [0, 0, 0] as [number, number, number]);
+      for (let tail = 0; tail < tailBrightness.length; tail++) {
+        const pathIndex = (((step - tail) % path.length) + path.length) % path.length;
+        const brightness = tailBrightness[tail];
+        colors[path[pathIndex]] = [Math.round(r * brightness), Math.round(g * brightness), Math.round(b * brightness)];
+      }
+      this.setAddonLeds(colors);
+
+      if (step < totalSteps - 1) {
+        step++;
+        setTimeout(frame, stepDelayMs);
+        return;
+      }
+      this.setAddonLeds(Array.from({ length: 8 }, () => [0, 0, 0] as const));
+      this.events.onAddonConnected?.();
+    };
+    frame();
+  }
+
+  /** Poke every analog/scratch CC the addon reports (see CC), so its firmware
+   * immediately echoes back each control's real current value instead of
+   * waiting for it to move — otherwise pots/faders read stale until touched. */
+  private requestCurrentValues(): void {
+    const output = this.output;
+    if (!output) return;
+    for (const cc of Object.values(CC)) output.send([0xb0, cc, 0]);
+    if (this.debug) {
+      console.log(
+        `%c[MIDI →]%c requested current values for ${Object.keys(CC).length} analog CCs`,
+        "color:#ffad64;font-weight:bold",
+        "color:inherit",
+      );
+    }
   }
 
   /** Light one BLOOPPAD-MAXX cell with a full RGB colour via SysEx. Components are 0..255. */
