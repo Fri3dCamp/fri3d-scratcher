@@ -4,7 +4,7 @@ import { parseBlob, selectCover } from "music-metadata";
 import { computeDetailPeaks, computePeaks, MixerEngine } from "./audio";
 import type { DeckSide, EqBand } from "./audio";
 import { DEFAULT_SAMPLE_NAMES, USER_1_BASE, USER_2_BASE, USER_BANK_SIZE } from "./samplePlayer";
-import { CC, MidiController, wrapDelta } from "./midi";
+import { CC, MidiController } from "./midi";
 import type { MidiStatus } from "./midi";
 
 // RGB equivalents of BloopPad.tsx's per-row TRACK_COLORS Tailwind classes, so the
@@ -240,10 +240,6 @@ export function useMixer(): MixerApi {
   const playBlinkOnRef = useRef(true);
   const nextStepRef = useRef(0);
   const sampleLoadRef = useRef<number[]>(new Array<number>(USER_2_BASE + USER_BANK_SIZE).fill(0));
-  const scratchPosRef = useRef<{ left: number | null; right: number | null }>({
-    left: null,
-    right: null,
-  });
   // Object URLs for cover art, revoked when a deck loads a new track.
   const coverUrlRef = useRef<{ left: string | null; right: string | null }>({
     left: null,
@@ -560,7 +556,6 @@ export function useMixer(): MixerApi {
     (side: DeckSide, active: boolean) => {
       const engine = ensureEngine();
       engine.deck(side).setScratching(active);
-      if (!active) scratchPosRef.current[side] = null;
       setDeck(side, { scratching: active });
     },
     [ensureEngine, setDeck],
@@ -873,11 +868,7 @@ export function useMixer(): MixerApi {
             break;
         }
       },
-      onScratchPosition: (side, position) => {
-        const prev = scratchPosRef.current[side];
-        scratchPosRef.current[side] = position;
-        if (prev != null) scratch(side, wrapDelta(prev, position));
-      },
+      onScratchSpeed: (side, speed) => scratch(side, speed),
       onScratchActive: (side, active) => setScratching(side, active),
       onAddonConnected: () => {
         midiRef.current?.setAddonLeds(computeAddonLedColors());

@@ -21,9 +21,9 @@ export const CC = {
 
   CROSSFADER: 0x59,
 
-  SCRATCH_LEFT_POS: 0x44,
+  SCRATCH_LEFT_SPEED: 0x44,
   SCRATCH_LEFT_ACTIVE: 0x45,
-  SCRATCH_RIGHT_POS: 0x54,
+  SCRATCH_RIGHT_SPEED: 0x54,
   SCRATCH_RIGHT_ACTIVE: 0x55,
 } as const;
 
@@ -81,9 +81,9 @@ const CC_NAMES: Record<number, string> = {
   [CC.RIGHT_BOTTOM]: "RIGHT_BOTTOM (high)",
   [CC.RIGHT_FADER]: "RIGHT_FADER (volume)",
   [CC.CROSSFADER]: "CROSSFADER",
-  [CC.SCRATCH_LEFT_POS]: "SCRATCH_LEFT_POS",
+  [CC.SCRATCH_LEFT_SPEED]: "SCRATCH_LEFT_SPEED",
   [CC.SCRATCH_LEFT_ACTIVE]: "SCRATCH_LEFT_ACTIVE",
-  [CC.SCRATCH_RIGHT_POS]: "SCRATCH_RIGHT_POS",
+  [CC.SCRATCH_RIGHT_SPEED]: "SCRATCH_RIGHT_SPEED",
   [CC.SCRATCH_RIGHT_ACTIVE]: "SCRATCH_RIGHT_ACTIVE",
 };
 
@@ -148,8 +148,9 @@ export type MidiStatus = "unsupported" | "idle" | "connecting" | "connected" | "
 export interface MidiEvents {
   /** A pot or fader moved. value is normalised 0..1. */
   onAnalog(cc: number, value: number): void;
-  /** Absolute scratch encoder position, 0..127 wrapping. */
-  onScratchPosition(side: DeckSide, position: number): void;
+  /** Signed jogwheel speed/direction: negative = counter-clockwise, positive =
+   * clockwise, 0 = stopped; magnitude is the turn rate. */
+  onScratchSpeed(side: DeckSide, speed: number): void;
   /** Scratch activity flag. */
   onScratchActive(side: DeckSide, active: boolean): void;
   /** A DJ addon button changed. index 0..7 is the physical slot (CC - BUTTON_CC_BASE), same slot its LED lives at. */
@@ -343,11 +344,11 @@ export class MidiController {
       case CC.CROSSFADER:
         this.events.onAnalog(cc, value / 127);
         break;
-      case CC.SCRATCH_LEFT_POS:
-        this.events.onScratchPosition("left", value);
+      case CC.SCRATCH_LEFT_SPEED:
+        this.events.onScratchSpeed("left", value - 64);
         break;
-      case CC.SCRATCH_RIGHT_POS:
-        this.events.onScratchPosition("right", value);
+      case CC.SCRATCH_RIGHT_SPEED:
+        this.events.onScratchSpeed("right", value - 64);
         break;
       case CC.SCRATCH_LEFT_ACTIVE:
         this.events.onScratchActive("left", value === 127);
@@ -528,12 +529,4 @@ export class MidiController {
       console.log(`%c[MIDI →]%c ${label} sysex ${entries.length} led(s): ${summary}`, "color:#ffad64;font-weight:bold", "color:inherit");
     }
   }
-}
-
-/** Signed delta between two wrapping 0..127 encoder positions. */
-export function wrapDelta(prev: number, cur: number): number {
-  let d = cur - prev;
-  if (d > 64) d -= 128;
-  if (d < -64) d += 128;
-  return d;
 }
