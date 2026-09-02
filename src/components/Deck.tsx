@@ -15,6 +15,9 @@ interface DeckProps {
   mixer: MixerApi;
 }
 
+// Shared "off" look for pads with no active state, matching the BLOOPPAD sequencer's idle steps.
+const IDLE_PAD_COLOR = "bg-neutral-200";
+
 function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
   const m = Math.floor(seconds / 60);
@@ -59,18 +62,35 @@ export function Deck({ side, state, mixer }: DeckProps) {
       label="Play"
       tutorialId={`play-${side}`}
       sub={state.playing ? "playing" : "paused"}
-      active={state.playing}
+      colorClass={
+        !state.trackName
+          ? IDLE_PAD_COLOR
+          : state.playing
+            ? mixer.playBlinkOn
+              ? "bg-yellow-300"
+              : IDLE_PAD_COLOR
+            : "bg-yellow-300"
+      }
       pressed={state.padsPressed[0]}
       onTrigger={() => mixer.togglePlay(side)}
     />
   );
-  const cuePad = <Pad key="cue" label="Cue" sub="to start" pressed={state.padsPressed[1]} onTrigger={() => mixer.cue(side)} />;
+  const cuePad = (
+    <Pad
+      key="cue"
+      label="Cue"
+      sub="to start"
+      colorClass={state.trackName ? "bg-fri3d-orange" : IDLE_PAD_COLOR}
+      pressed={state.padsPressed[3]}
+      onTrigger={() => mixer.cue(side)}
+    />
+  );
   const hot1Pad = (
     <div key="hot1" className="relative">
       <Pad
         label="Hot 1"
         sub={state.hotCues[0] != null ? formatTime(state.hotCues[0]) : "set"}
-        hot={state.hotCues[0] != null}
+        colorClass={state.hotCues[0] != null ? "bg-fri3d-purple-light" : IDLE_PAD_COLOR}
         pressed={state.padsPressed[2]}
         onPress={(shift) => mixer.hotCuePress(side, 0, shift)}
         onRelease={() => mixer.hotCueRelease(side, 0)}
@@ -93,8 +113,8 @@ export function Deck({ side, state, mixer }: DeckProps) {
       <Pad
         label="Hot 2"
         sub={state.hotCues[1] != null ? formatTime(state.hotCues[1]) : "set"}
-        hot={state.hotCues[1] != null}
-        pressed={state.padsPressed[3]}
+        colorClass={state.hotCues[1] != null ? "bg-fri3d-purple-light" : IDLE_PAD_COLOR}
+        pressed={state.padsPressed[1]}
         onPress={(shift) => mixer.hotCuePress(side, 1, shift)}
         onRelease={() => mixer.hotCueRelease(side, 1)}
         onContext={() => mixer.hotCuePress(side, 1, true)}

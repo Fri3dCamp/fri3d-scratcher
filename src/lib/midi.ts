@@ -27,41 +27,12 @@ export const CC = {
   SCRATCH_RIGHT_ACTIVE: 0x55,
 } as const;
 
-// The 3x3 matrix exposes 8 usable buttons. Order them 0..7 the way the
-// firmware indexes them so the UI pads line up with the hardware.
-// ordered from top left to bottom right in 2 rows
-// modulo 4; 0 = play, 1 = hot 2, 2 = hot 1, 3 = cue
-export const BUTTON_CC: Record<number, number> = {
-  0x60: 3, // col 1 row 0 -- top row button 1 // deck 1 cue
-  0x61: 2, // col 1 row 2 -- top row button 2 // deck 1 hot 1
-  0x62: 6, // col 1 row 1 -- top row button 3 // deck 2 hot 1
-  0x63: 7, // col 2 row 1 -- top row button 4 // deck 2 cue
-  0x64: 0, // col 0 row 0 -- bottom row button 1 // deck 1 play
-  0x65: 1, // col 0 row 2 -- bottom row button 2 // deck 1 hot 2
-  0x66: 5, // col 0 row 1 -- bottom row button 3 // deck 2 hot 2
-  0x67: 4, // col 2 row 0 -- bottom row button 4 // deck 2 play
-};
-
-// Firmware LED palette, sent as a raw CC value for the addon LEDs (setLed).
-// The BLOOPPAD-MAXX grid takes direct RGB instead — see setBloopPadLed/setBloopPadLeds.
-export const LED_COLOR = {
-  OFF: 0,
-  ORANGE_RED: 1,
-  TEAL: 2,
-  YELLOW_GREEN: 3,
-  WARM_WHITE: 4,
-  BLUE: 5,
-  CYAN: 6,
-  WHITE: 7,
-  BRIGHT_WHITE: 8,
-  GREEN: 9,
-} as const;
-
+// The 8 buttons (two rows of 4) each send their own CC directly — no matrix
+// scan/decode needed — and each sits above its own RGB LED at the same offset
+// from LED_CC_BASE. So button CC 0x60+i and LED CC 0x20+i are the same physical
+// slot i (0..7); see setAddonLed/setAddonLeds for the LED side.
+const BUTTON_CC_BASE = 0x60;
 const LED_CC_BASE = 0x20;
-// LED CC slots (0x20..0x27) follow the same physical matrix order as button
-// CCs (0x60..0x67), not the logical 0..7 button indices used by onButton.
-// Map logical button index -> physical LED slot.
-const LED_SLOT_FOR_BUTTON = [4, 5, 1, 0, 7, 6, 2, 3] as const;
 
 // SysEx LED RGB protocol: F0 13 37 <led> <red> <green> <blue> [<led> <red> <green> <blue> ...] F7.
 // Multiple <led><red><green><blue> patterns can be packed into a single
@@ -118,7 +89,7 @@ const CC_NAMES: Record<number, string> = {
 
 function ccLabel(cc: number): string {
   if (cc in CC_NAMES) return CC_NAMES[cc];
-  if (cc in BUTTON_CC) return `BUTTON_${BUTTON_CC[cc]}`;
+  if (cc >= BUTTON_CC_BASE && cc < BUTTON_CC_BASE + 8) return `BUTTON_${cc - BUTTON_CC_BASE}`;
   return "unknown";
 }
 
@@ -181,7 +152,7 @@ export interface MidiEvents {
   onScratchPosition(side: DeckSide, position: number): void;
   /** Scratch activity flag. */
   onScratchActive(side: DeckSide, active: boolean): void;
-  /** A matrix button changed. index 0..7. */
+  /** A DJ addon button changed. index 0..7 is the physical slot (CC - BUTTON_CC_BASE), same slot its LED lives at. */
   onButton(index: number, pressed: boolean): void;
   /** A BLOOPPAD-MAXX grid button changed. */
   onBloopPadButton?(row: number, column: number, pressed: boolean): void;
@@ -198,7 +169,8 @@ export class MidiController {
   /** Bumped whenever bloopPadOutput actually changes, to invalidate any in-flight connect animation. */
   private bloopPadGeneration = 0;
   private events: MidiEvents;
-  private ledState = new Array<number>(8).fill(-1);
+  /** Packed (r<<16|g<<8|b) per-LED cache for the DJ addon's SysEx RGB path. */
+  private addonLedRgbState = new Array<number>(8).fill(-1);
   /** Packed (r<<16|g<<8|b) per-LED cache for the BLOOPPAD-MAXX SysEx RGB path. */
   private bloopPadLedRgbState = new Array<number>(64).fill(-1);
   private bloopPadButtonState = new Array<boolean>(64).fill(false);
@@ -298,7 +270,7 @@ export class MidiController {
     }
 
     // Force a full refresh when a controller reconnects.
-    this.ledState.fill(-1);
+    this.addonLedRgbState.fill(-1);
     this.bloopPadLedRgbState.fill(-1);
 
     if (bloopPadChanged && bloopPadOutput !== null) this.playBloopPadConnectAnimation();
@@ -334,8 +306,8 @@ export class MidiController {
       return;
     }
 
-    if (cc in BUTTON_CC) {
-      const index = BUTTON_CC[cc];
+    if (cc >= BUTTON_CC_BASE && cc < BUTTON_CC_BASE + 8) {
+      const index = cc - BUTTON_CC_BASE;
       const pressed = value === 127;
       // The firmware can emit repeated messages for the same physical state
       // (e.g. two press events with no release in between). Only forward the
@@ -373,25 +345,28 @@ export class MidiController {
     }
   }
 
-  /** Light a single LED (index 0..7) with a firmware palette value. */
-  setLed(index: number, color: number): void {
+  /** Light a single DJ addon LED (index 0..7) with a full RGB colour via SysEx.
+   * The wire index is LED_CC_BASE + index — the same control number that used
+   * to set this LED's colour via a plain CC message. Components are 0..255. */
+  setAddonLed(index: number, r: number, g: number, b: number): void {
     if (index < 0 || index > 7) return;
-    if (this.ledState[index] === color) return;
-    this.ledState[index] = color;
-    const slot = LED_SLOT_FOR_BUTTON[index] ?? index;
-    this.output?.send([0xb0, LED_CC_BASE + slot, color]);
-    if (this.debug) {
-      console.log(
-        `%c[MIDI →]%c LED ${index} slot=${slot} cc=${hex2(LED_CC_BASE + slot)} color=${color}`,
-        "color:#ffad64;font-weight:bold",
-        "color:inherit",
-      );
-    }
+    const packed = (r << 16) | (g << 8) | b;
+    if (this.addonLedRgbState[index] === packed) return;
+    this.addonLedRgbState[index] = packed;
+    this.sendRgbSysex(this.output, [[LED_CC_BASE + index, r, g, b]], "addon");
   }
 
-  /** Push all 8 LED colours at once. */
-  setLeds(colors: number[]): void {
-    for (let i = 0; i < 8; i++) this.setLed(i, colors[i] ?? 0);
+  /** Push RGB colours for all 8 DJ addon LEDs, as one SysEx message. Components are 0..255. */
+  setAddonLeds(colors: readonly (readonly [number, number, number])[]): void {
+    const entries: LedRgbEntry[] = [];
+    for (let index = 0; index < 8; index++) {
+      const [r, g, b] = colors[index] ?? [0, 0, 0];
+      const packed = (r << 16) | (g << 8) | b;
+      if (this.addonLedRgbState[index] === packed) continue;
+      this.addonLedRgbState[index] = packed;
+      entries.push([LED_CC_BASE + index, r, g, b]);
+    }
+    this.sendRgbSysex(this.output, entries, "addon");
   }
 
   /** Light one BLOOPPAD-MAXX cell with a full RGB colour via SysEx. Components are 0..255. */
@@ -402,7 +377,7 @@ export class MidiController {
     if (this.bloopPadLedRgbState[arrayIndex] === packed) return;
     this.bloopPadLedRgbState[arrayIndex] = packed;
     const wireIndex = (row << 4) | (0x08 + column);
-    this.sendBloopPadRgb([[wireIndex, r, g, b]]);
+    this.sendRgbSysex(this.bloopPadOutput, [[wireIndex, r, g, b]], "BLOOPPAD");
   }
 
   /** Push row-major RGB colours for all 64 BLOOPPAD-MAXX LEDs, as one SysEx message. Components are 0..255. */
@@ -418,7 +393,7 @@ export class MidiController {
         entries.push([(row << 4) | (0x08 + column), r, g, b]);
       }
     }
-    this.sendBloopPadRgb(entries);
+    this.sendRgbSysex(this.bloopPadOutput, entries, "BLOOPPAD");
   }
 
   /**
@@ -469,9 +444,8 @@ export class MidiController {
     frame();
   }
 
-  /** Send one or more <led><r><g><b> patterns to the BLOOPPAD-MAXX in a single SysEx message. */
-  private sendBloopPadRgb(entries: LedRgbEntry[]): void {
-    const output = this.bloopPadOutput;
+  /** Send one or more <led><r><g><b> patterns to the given output in a single SysEx message. */
+  private sendRgbSysex(output: MIDIOutput | null, entries: LedRgbEntry[], label: string): void {
     if (!output || entries.length === 0) return;
     const saturated: LedRgbEntry[] = entries.map(([index, r, g, b]) => [index, ...saturateRgb(r, g, b)]);
     const message = [
@@ -483,7 +457,7 @@ export class MidiController {
     output.send(message);
     if (this.debug) {
       const summary = saturated.map(([index, r, g, b]) => `${index}:rgb(${r},${g},${b})`).join(" ");
-      console.log(`%c[MIDI →]%c BLOOPPAD sysex ${entries.length} led(s): ${summary}`, "color:#ffad64;font-weight:bold", "color:inherit");
+      console.log(`%c[MIDI →]%c ${label} sysex ${entries.length} led(s): ${summary}`, "color:#ffad64;font-weight:bold", "color:inherit");
     }
   }
 }
